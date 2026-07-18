@@ -11,6 +11,9 @@
 #include "core/libraries/kernel/threads/thread_state.h"
 #include "core/libraries/libs.h"
 #include "core/memory.h"
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+#include "core/cpu/fex_backend.h"
+#endif
 
 #if defined(ARCH_X86_64) || defined(__arm64__) || defined(__aarch64__)
 extern "C" void* PS4_SYSV_ABI _runOnAnotherStack(void* arg, void* func,
@@ -36,9 +39,11 @@ void PS4_SYSV_ABI _sceKernelSetThreadDtors(ThreadDtor dtor) {
 
 static void ExitThread() {
     Pthread* curthread = g_curthread;
+    LOG_INFO(Lib_Kernel, "ExitThread: '{}' (tid={}) terminating", curthread->name,
+             curthread->tid.load());
 
     /* Check if there is thread specific data: */
-    if (curthread->specific != nullptr) {
+    if (curthread->is_guest_thread && curthread->specific != nullptr) {
         /* Run the thread-specific data destructors: */
         _thread_cleanupspecific();
     }
@@ -72,6 +77,14 @@ static void ExitThread() {
 void PS4_SYSV_ABI posix_pthread_exit(void* status) {
     Pthread* curthread = g_curthread;
 
+    // Diagnostic: guest worker threads that leave their job loop on an error
+    // usually vanish silently and deadlock their gang much later - log every
+    // guest thread exit with its status value.
+    if (curthread->is_guest_thread) {
+        LOG_INFO(Lib_Kernel, "pthread_exit: guest thread '{}' exits with status {}",
+                 curthread->name, fmt::ptr(status));
+    }
+
     /* Check if this thread is already in the process of exiting: */
     ASSERT_MSG(!curthread->cancelling, "Thread {} has called pthread_exit from a destructor",
                fmt::ptr(curthread));
@@ -87,13 +100,36 @@ void PS4_SYSV_ABI posix_pthread_exit(void* status) {
     while (!curthread->cleanup.empty()) {
         PthreadCleanup* old = curthread->cleanup.front();
         curthread->cleanup.pop_front();
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+        auto& fex = Core::CPU::FexBackend::Instance();
+        const VAddr routine_addr = reinterpret_cast<VAddr>(old->routine);
+        if (fex.IsGuestAddress(routine_addr)) {
+            fex.CallGuestCallback(routine_addr, reinterpret_cast<u64>(old->routine_arg));
+        } else {
+            old->routine(old->routine_arg);
+        }
+#else
         old->routine(old->routine_arg);
+#endif
         if (old->onheap) {
             delete old;
         }
     }
-    if (ThreadDtors) {
+    // Native shadPS4 workers share this pthread implementation with PS4 guest threads, but the
+    // process-wide destructor registered by libkernel is guest code and must never run when a
+    // host worker (for example an AvPlayer decoder) exits.
+    if (ThreadDtors && curthread->is_guest_thread) {
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+        auto& fex = Core::CPU::FexBackend::Instance();
+        const VAddr dtor_addr = reinterpret_cast<VAddr>(ThreadDtors);
+        if (fex.IsGuestAddress(dtor_addr)) {
+            fex.CallGuestCallback(dtor_addr);
+        } else {
+            ThreadDtors();
+        }
+#else
         (ThreadDtors)();
+#endif
     }
     ExitThread();
 }
@@ -223,10 +259,28 @@ static void* RunThread(void* arg) {
     /* Run the current thread's start routine with argument: */
     auto* const stack =
         (void*)(((size_t)curthread->attr.stackaddr_attr + curthread->attr.stacksize_attr) & (~15));
-    void* ret = _runOnAnotherStack(curthread->arg, (void*)curthread->start_routine, stack);
+    void* ret;
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+    if (curthread->is_guest_thread) {
+        const VAddr start_addr = reinterpret_cast<VAddr>(curthread->start_routine);
+        ret = reinterpret_cast<void*>(Core::CPU::FexBackend::Instance().RunGuestThread(
+            start_addr, reinterpret_cast<u64>(curthread->arg),
+            reinterpret_cast<VAddr>(curthread->attr.stackaddr_attr),
+            curthread->attr.stacksize_attr));
+    } else {
+        // shadPS4 also uses this pthread implementation for native host workers.
+        ret = _runOnAnotherStack(curthread->arg, reinterpret_cast<void*>(curthread->start_routine),
+                                 stack);
+    }
+#else
+    ret = _runOnAnotherStack(curthread->arg, reinterpret_cast<void*>(curthread->start_routine),
+                             stack);
+#endif
 
     /* Remove thread from tracking */
     DebugState.RemoveCurrentThreadFromGuestList();
+    LOG_INFO(Lib_Kernel, "RunThread: start routine of '{}' returned {}", curthread->name,
+             fmt::ptr(ret));
     posix_pthread_exit(ret);
 #ifdef WIN32
     return 0;
@@ -283,6 +337,12 @@ int PS4_SYSV_ABI posix_pthread_create_name_np(PthreadT* thread, const PthreadAtt
     new_thread->magic = Pthread::ThrMagic;
     new_thread->start_routine = start_routine;
     new_thread->arg = arg;
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+    new_thread->is_guest_thread =
+        Core::Memory::Instance()->IsValidMapping(reinterpret_cast<VAddr>(start_routine));
+#else
+    new_thread->is_guest_thread = true;
+#endif
     new_thread->cancel_enable = true;
     new_thread->cancel_async = false;
 
@@ -416,7 +476,17 @@ int PS4_SYSV_ABI posix_pthread_once(PthreadOnce* once_control,
 
     PthreadCleanup cup{once_cancel_handler, once_control, 0};
     g_curthread->cleanup.push_front(&cup);
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+    auto& fex = Core::CPU::FexBackend::Instance();
+    const VAddr init_addr = reinterpret_cast<VAddr>(init_routine);
+    if (fex.IsGuestAddress(init_addr)) {
+        fex.CallGuestCallback(init_addr);
+    } else {
+        init_routine();
+    }
+#else
     init_routine();
+#endif
     g_curthread->cleanup.pop_front();
 
     auto state = PthreadOnceState::InProgress;

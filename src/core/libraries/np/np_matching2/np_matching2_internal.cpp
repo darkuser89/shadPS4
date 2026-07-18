@@ -8,6 +8,7 @@
 
 #include "common/logging/log.h"
 #include "common/thread.h"
+#include "core/cpu/guest_callback.h"
 #include "core/libraries/network/net.h"
 #include "core/libraries/np/np_common.h"
 #include "core/libraries/np/np_error.h"
@@ -1310,8 +1311,9 @@ void FireEvent(const PendingEvent& ev) {
             LOG_DEBUG(Lib_NpMatching2, "callback CONTEXT ctx={} event={:#x} cause={} err={:#x}",
                       ev.ctx_id, static_cast<u16>(ev.ctx_event),
                       static_cast<u8>(ev.ctx_event_cause), ev.error_code);
-            ctx->context_callback(ev.ctx_id, ev.ctx_event, ev.ctx_event_cause, ev.error_code,
-                                  ctx->context_callback_arg);
+            Core::CPU::InvokeGuestOrHost(ctx->context_callback, ev.ctx_id, ev.ctx_event,
+                                         ev.ctx_event_cause, ev.error_code,
+                                         ctx->context_callback_arg);
         } else {
             LOG_WARNING(Lib_NpMatching2, "callback CONTEXT ctx={} event={:#x} SKIPPED: no callback",
                         ev.ctx_id, static_cast<u16>(ev.ctx_event));
@@ -1326,8 +1328,8 @@ void FireEvent(const PendingEvent& ev) {
                       "callback REQUEST ctx={} reqId={} event={:#x} err={:#x} data={}", ev.ctx_id,
                       ev.req_id, static_cast<u16>(ev.req_event), ev.error_code,
                       fmt::ptr(ev.request_data));
-            ev.request_cb(ev.ctx_id, ev.req_id, ev.req_event, ev.error_code, ev.request_data,
-                          ev.request_cb_arg);
+            Core::CPU::InvokeGuestOrHost(ev.request_cb, ev.ctx_id, ev.req_id, ev.req_event,
+                                         ev.error_code, ev.request_data, ev.request_cb_arg);
         } else {
             LOG_WARNING(Lib_NpMatching2,
                         "callback REQUEST ctx={} reqId={} event={:#x} SKIPPED: no callback",
@@ -1340,8 +1342,9 @@ void FireEvent(const PendingEvent& ev) {
                       "callback SIGNALING ctx={} room={} member={} event={:#x} err={:#x}",
                       ev.ctx_id, ev.room_id, ev.member_id, static_cast<u16>(ev.sig_event),
                       ev.error_code);
-            ctx->signaling_callback(ev.ctx_id, ev.room_id, ev.member_id, ev.sig_event,
-                                    ev.error_code, ctx->signaling_callback_arg);
+            Core::CPU::InvokeGuestOrHost(ctx->signaling_callback, ev.ctx_id, ev.room_id,
+                                         ev.member_id, ev.sig_event, ev.error_code,
+                                         ctx->signaling_callback_arg);
         } else {
             LOG_WARNING(Lib_NpMatching2,
                         "callback SIGNALING ctx={} room={} event={:#x} SKIPPED: no callback",
@@ -1353,8 +1356,9 @@ void FireEvent(const PendingEvent& ev) {
             LOG_DEBUG(Lib_NpMatching2, "callback ROOM_EVENT ctx={} room={} event={:#x} data={}",
                       ev.ctx_id, ev.room_id, static_cast<u16>(ev.room_event),
                       fmt::ptr(ev.room_event_data));
-            ctx->room_event_callback(ev.ctx_id, ev.room_id, ev.room_event, ev.room_event_data,
-                                     ctx->room_event_callback_arg);
+            Core::CPU::InvokeGuestOrHost(ctx->room_event_callback, ev.ctx_id, ev.room_id,
+                                         ev.room_event, ev.room_event_data,
+                                         ctx->room_event_callback_arg);
         } else {
             LOG_WARNING(Lib_NpMatching2,
                         "callback ROOM_EVENT ctx={} room={} event={:#x} SKIPPED: no callback",
@@ -1366,8 +1370,9 @@ void FireEvent(const PendingEvent& ev) {
             LOG_DEBUG(Lib_NpMatching2, "callback LOBBY_EVENT ctx={} lobby={} event={:#x} data={}",
                       ev.ctx_id, ev.lobby_id, static_cast<u16>(ev.lobby_event),
                       fmt::ptr(ev.lobby_event_data));
-            ctx->lobby_event_callback(ev.ctx_id, ev.lobby_id, ev.lobby_event, ev.lobby_event_data,
-                                      ctx->lobby_event_callback_arg);
+            Core::CPU::InvokeGuestOrHost(ctx->lobby_event_callback, ev.ctx_id, ev.lobby_id,
+                                         ev.lobby_event, ev.lobby_event_data,
+                                         ctx->lobby_event_callback_arg);
         } else {
             LOG_WARNING(Lib_NpMatching2,
                         "callback LOBBY_EVENT ctx={} lobby={} event={:#x} SKIPPED: no callback",
@@ -1378,8 +1383,9 @@ void FireEvent(const PendingEvent& ev) {
         if (ctx->lobby_message_callback) {
             LOG_DEBUG(Lib_NpMatching2, "callback LOBBY_MESSAGE ctx={} lobby={} src={} event={:#x}",
                       ev.ctx_id, ev.lobby_id, ev.src_member_id, static_cast<u16>(ev.msg_event));
-            ctx->lobby_message_callback(ev.ctx_id, ev.lobby_id, ev.src_member_id, ev.msg_event,
-                                        ev.message_data, ctx->lobby_message_callback_arg);
+            Core::CPU::InvokeGuestOrHost(ctx->lobby_message_callback, ev.ctx_id, ev.lobby_id,
+                                         ev.src_member_id, ev.msg_event, ev.message_data,
+                                         ctx->lobby_message_callback_arg);
         } else {
             LOG_WARNING(Lib_NpMatching2,
                         "callback LOBBY_MESSAGE ctx={} lobby={} SKIPPED: no callback", ev.ctx_id,
@@ -1390,8 +1396,9 @@ void FireEvent(const PendingEvent& ev) {
         if (ctx->room_message_callback) {
             LOG_DEBUG(Lib_NpMatching2, "callback ROOM_MESSAGE ctx={} room={} src={} event={:#x}",
                       ev.ctx_id, ev.room_id, ev.src_member_id, static_cast<u16>(ev.msg_event));
-            ctx->room_message_callback(ev.ctx_id, ev.room_id, ev.src_member_id, ev.msg_event,
-                                       ev.message_data, ctx->room_message_callback_arg);
+            Core::CPU::InvokeGuestOrHost(ctx->room_message_callback, ev.ctx_id, ev.room_id,
+                                         ev.src_member_id, ev.msg_event, ev.message_data,
+                                         ctx->room_message_callback_arg);
         } else {
             LOG_WARNING(Lib_NpMatching2,
                         "callback ROOM_MESSAGE ctx={} room={} SKIPPED: no callback", ev.ctx_id,

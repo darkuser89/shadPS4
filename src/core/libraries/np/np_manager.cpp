@@ -11,6 +11,7 @@
 #include <core/user_settings.h>
 #include "common/elf_info.h"
 #include "common/logging/log.h"
+#include "core/cpu/guest_callback.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/kernel/process.h"
@@ -275,7 +276,7 @@ s32 PS4_SYSV_ABI sceNpCheckPlus(s32 req_id, const OrbisNpCheckPlusParameter* par
         return CompleteRequest(*req, ORBIS_NP_ERROR_SIGNED_OUT);
     }
     LOG_DEBUG(Lib_NpManager, "req_id = {:#x}, features = {:#x}", req_id, param->features);
-    // Grant PS+ — shadNet has no subscription gating.
+    // Grant PS+ â€” shadNet has no subscription gating.
     result->authorized = true;
     return CompleteRequest(*req, ORBIS_OK);
 }
@@ -935,9 +936,9 @@ static void DispatchPendingNpStateCallbacks() {
 
     for (auto& event : pending_events) {
         if (legacy_callback.func != nullptr) {
-            legacy_callback.func(event.user_id, event.state,
-                                 event.has_np_id ? &event.np_id : nullptr,
-                                 legacy_callback.userdata);
+            Core::CPU::InvokeGuestOrHost(legacy_callback.func, event.user_id, event.state,
+                                         event.has_np_id ? &event.np_id : nullptr,
+                                         legacy_callback.userdata);
         }
 
         for (const auto& entry : callbacks) {
@@ -946,18 +947,20 @@ static void DispatchPendingNpStateCallbacks() {
             }
 
             if (entry.func != nullptr) {
-                entry.func(event.user_id, event.state, entry.userdata);
+                Core::CPU::InvokeGuestOrHost(entry.func, event.user_id, event.state, entry.userdata);
             }
         }
 
         if (toolkit_callback.func != nullptr) {
-            toolkit_callback.func(event.user_id, event.state, toolkit_callback.userdata);
+            Core::CPU::InvokeGuestOrHost(toolkit_callback.func, event.user_id, event.state,
+                                         toolkit_callback.userdata);
         }
     }
 
     // Reachability callback fires only on a change, after the state callbacks.
     for (const auto& [user_id, reach] : reachability_changes) {
-        reachability_callback.func(user_id, reach, reachability_callback.userdata);
+        Core::CPU::InvokeGuestOrHost(reachability_callback.func, user_id, reach,
+                                     reachability_callback.userdata);
     }
 }
 

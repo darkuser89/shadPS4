@@ -22,15 +22,18 @@ Core::Tcb* TcbCtor(Pthread* thread, int initial) {
     auto* addr_out = linker->AllocateTlsForThread(initial);
     ASSERT_MSG(addr_out, "Unable to allocate guest TCB");
 
-    // Initialize allocated memory and allocate DTV table.
+    // Initialize the complete TLS+TCB block and allocate the DTV table. Guest code reads the
+    // stack canary at FS:[0x28], which lies in the otherwise opaque second half of the 0x40-byte
+    // TCB. Secondary-thread blocks come from malloc on ARM64/FEX, so leaving that half untouched
+    // makes the canary undefined and can cause false stack-check failures.
     const u32 num_dtvs = linker->MaxTlsIndex();
     const auto static_tls_size = linker->StaticTlsSize();
     auto* dtv_table = new Core::DtvEntry[num_dtvs + 2]{};
+    std::memset(addr_out, 0, static_tls_size + TlsTcbSize);
 
     // Initialize thread control block
     u8* addr = reinterpret_cast<u8*>(addr_out);
     auto* tcb = reinterpret_cast<Core::Tcb*>(addr + static_tls_size);
-    memset(addr_out, 0, static_tls_size);
     tcb->tcb_self = tcb;
     tcb->tcb_dtv = dtv_table;
 

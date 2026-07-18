@@ -295,6 +295,7 @@ struct Pthread {
     bool unblock_sigcancel;
     bool in_sigsuspend;
     bool force_exit;
+    bool is_guest_thread;
     PthreadState state;
     int error;
     Pthread* joiner;
@@ -376,5 +377,6 @@ void RegisterThread(Core::Loader::SymbolsResolver* sym);
 void RegisterRtld(Core::Loader::SymbolsResolver* sym);
 void RegisterKernelEventFlag(Core::Loader::SymbolsResolver* sym);
 void RegisterPthreadClean(Core::Loader::SymbolsResolver* sym);
+void RegisterUmtx(Core::Loader::SymbolsResolver* sym);
 
 } // namespace Libraries::Kernel

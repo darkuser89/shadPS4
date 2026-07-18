@@ -16,6 +16,9 @@
 #include "core/libraries/libc_internal/libc_internal_io.h"
 #include "core/libraries/libc_internal/libc_internal_threads.h"
 #include "core/libraries/libs.h"
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+#include "core/cpu/fex_hle.h"
+#endif
 #include "printf.h"
 
 namespace Libraries::LibcInternal {
@@ -24,6 +27,44 @@ s32 PS4_SYSV_ABI internal_snprintf(char* s, u64 n, VA_ARGS) {
     VA_CTX(ctx);
     return snprintf_ctx(s, n, &ctx);
 }
+
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+s32 PS4_SYSV_ABI internal_snprintf_fex() {
+    using namespace Core::CPU;
+
+    auto* const gpr = g_fex_guest_gregs;
+    auto* const xmm = g_fex_guest_xmm;
+    if (gpr == nullptr || xmm == nullptr) {
+        UnsupportedHleAbi("internal_snprintf_fex called without an active FEX guest thread");
+    }
+
+    auto* const stack = reinterpret_cast<const u64*>(gpr[FEX_RSP] + sizeof(u64));
+    alignas(16) Common::VaCtx ctx{};
+
+    // snprintf has two fixed arguments. Recreate the compact VaCtx layout used by
+    // the native x86 wrapper: format and the next five integer arguments occupy
+    // the six saved GP slots, with all remaining arguments read from guest RSP.
+    ctx.reg_save_area.gp[0] = gpr[FEX_RDX];
+    ctx.reg_save_area.gp[1] = gpr[FEX_RCX];
+    ctx.reg_save_area.gp[2] = gpr[FEX_R8];
+    ctx.reg_save_area.gp[3] = gpr[FEX_R9];
+    ctx.reg_save_area.gp[4] = stack[0];
+    ctx.reg_save_area.gp[5] = stack[1];
+
+    for (size_t i = 0; i < std::size(ctx.reg_save_area.fp); ++i) {
+        // FEX stores four qwords per AVX register; the low two form XMM0..7.
+        std::memcpy(&ctx.reg_save_area.fp[i], &xmm[i * 4], sizeof(ctx.reg_save_area.fp[i]));
+    }
+
+    ctx.va_list.gp_offset = offsetof(Common::VaRegSave, gp);
+    ctx.va_list.fp_offset = offsetof(Common::VaRegSave, fp);
+    ctx.va_list.overflow_arg_area = const_cast<u64*>(stack + 2);
+    ctx.va_list.reg_save_area = &ctx.reg_save_area;
+
+    auto* const s = reinterpret_cast<char*>(gpr[FEX_RDI]);
+    return snprintf_ctx(s, gpr[FEX_RSI], &ctx);
+}
+#endif
 
 std::map<s32, OrbisFILE*> g_files{};
 // Constants for tracking accurate file indexes.
@@ -465,7 +506,12 @@ s32 PS4_SYSV_ABI internal_fclose(OrbisFILE* file) {
 }
 
 void RegisterlibSceLibcInternalIo(Core::Loader::SymbolsResolver* sym) {
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+    LIB_FUNCTION("eLdDw6l0-bU", "libSceLibcInternal", 1, "libSceLibcInternal",
+                 internal_snprintf_fex);
+#else
     LIB_FUNCTION("eLdDw6l0-bU", "libSceLibcInternal", 1, "libSceLibcInternal", internal_snprintf);
+#endif
     LIB_FUNCTION("xGT4Mc55ViQ", "libSceLibcInternal", 1, "libSceLibcInternal", internal__Fofind);
     LIB_FUNCTION("dREVnZkAKRE", "libSceLibcInternal", 1, "libSceLibcInternal", internal__Foprep);
     LIB_FUNCTION("sQL8D-jio7U", "libSceLibcInternal", 1, "libSceLibcInternal", internal__Fopen);

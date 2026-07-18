@@ -15,4 +15,7 @@ void IncrementRip(void* ctx, u64 length);
 
 bool IsWriteError(void* ctx);
 
+/// Returns true when the native fault is an ARM64 data-alignment fault.
+bool IsAlignmentError(void* ctx);
+
 } // namespace Common

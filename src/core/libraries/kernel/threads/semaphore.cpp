@@ -3,8 +3,10 @@
 
 #include <condition_variable>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <semaphore>
+#include <unordered_map>
 
 #include "core/libraries/kernel/sync/semaphore.h"
 
@@ -27,6 +29,48 @@ struct PthreadSem {
     CountingSemaphore semaphore;
     std::atomic<s32> value;
 };
+
+// Guest sem_t storage normally contains a pointer created by posix_sem_init. Some Unity
+// runtimes also use libc-internal/static semaphore representations which aren't host pointers.
+// Keep ownership and a per-guest-address shadow so those representations never get dereferenced
+// by native ARM64 HLE code and concurrent wait/post calls still share the same state.
+static std::mutex pthread_sems_mutex;
+static std::once_flag shadow_semaphore_warning;
+static std::unordered_map<PthreadSem**, std::shared_ptr<PthreadSem>> pthread_sems_by_handle;
+static std::unordered_map<PthreadSem*, std::weak_ptr<PthreadSem>> pthread_sems_by_impl;
+
+static std::shared_ptr<PthreadSem> GetPthreadSem(PthreadSem** sem, bool create_shadow) {
+    if (sem == nullptr || *sem == nullptr) {
+        return {};
+    }
+
+    std::scoped_lock lock{pthread_sems_mutex};
+    if (const auto it = pthread_sems_by_handle.find(sem); it != pthread_sems_by_handle.end()) {
+        return it->second;
+    }
+
+    if (const auto it = pthread_sems_by_impl.find(*sem); it != pthread_sems_by_impl.end()) {
+        if (auto implementation = it->second.lock()) {
+            pthread_sems_by_handle.emplace(sem, implementation);
+            return implementation;
+        }
+        pthread_sems_by_impl.erase(it);
+    }
+
+    if (!create_shadow) {
+        return {};
+    }
+
+    auto shadow = std::make_shared<PthreadSem>(0);
+    pthread_sems_by_handle.emplace(sem, shadow);
+    std::call_once(shadow_semaphore_warning, [sem] {
+        LOG_WARNING(Lib_Kernel,
+                    "Using shadow POSIX semaphores for libc-internal guest representations "
+                    "(first handle {}, value {})",
+                    fmt::ptr(sem), fmt::ptr(*sem));
+    });
+    return shadow;
+}
 
 class OrbisSem {
 public:
@@ -57,6 +101,15 @@ public:
         const s32 result = waiter.Wait(lk, timeout);
         if (result == ORBIS_KERNEL_ERROR_ETIMEDOUT) {
             wait_list.erase(it);
+        }
+        if (result != ORBIS_OK) {
+            // Diagnostic: a blocking wait that ends in an error is what job/mixer
+            // worker loops typically treat as a shutdown signal - make it visible.
+            LOG_WARNING(Lib_Kernel,
+                        "sceKernelWaitSema: thread '{}' wait on sem '{}' failed: result={:#x} "
+                        "(need={}, tokens={}, timed={})",
+                        g_curthread->name, name, static_cast<u32>(result), need_count,
+                        token_count.load(), timeout != nullptr);
         }
         return result;
     }
@@ -189,7 +242,10 @@ public:
     bool is_fifo;
 };
 
-using OrbisKernelSema = Common::SlotId;
+// SceKernelSema is a 32-bit guest ABI handle.  Keep the SlotId wrapper on the
+// implementation side only: passing the C++ struct by value needlessly turns
+// these exports into an aggregate ABI case for translated guests.
+using OrbisKernelSema = u32;
 
 static Common::SlotVector<std::unique_ptr<OrbisSem>> orbis_sems;
 
@@ -199,48 +255,68 @@ s32 PS4_SYSV_ABI sceKernelCreateSema(OrbisKernelSema* sem, const char* pName, u3
         LOG_ERROR(Lib_Kernel, "Semaphore creation parameters are invalid!");
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
-    *sem = orbis_sems.insert(
-        std::move(std::make_unique<OrbisSem>(initCount, maxCount, pName, attr == 1)));
+    *sem = orbis_sems
+               .insert(std::move(std::make_unique<OrbisSem>(initCount, maxCount, pName, attr == 1)))
+               .index;
+    LOG_INFO(Lib_Kernel, "sceKernelCreateSema: thread '{}' created sem[{}] '{}' init={} max={}",
+             g_curthread->name, *sem, pName, initCount, maxCount);
     return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceKernelWaitSema(OrbisKernelSema sem, s32 needCount, u32* pTimeout) {
-    if (!orbis_sems.is_allocated(sem)) {
+    const Common::SlotId id{sem};
+    if (!orbis_sems.is_allocated(id)) {
+        LOG_WARNING(Lib_Kernel, "sceKernelWaitSema: thread '{}' waited on invalid sem[{}] -> ESRCH",
+                    g_curthread->name, sem);
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    return orbis_sems[sem]->Wait(true, needCount, pTimeout);
+    return orbis_sems[id]->Wait(true, needCount, pTimeout);
 }
 
 s32 PS4_SYSV_ABI sceKernelSignalSema(OrbisKernelSema sem, s32 signalCount) {
-    if (!orbis_sems.is_allocated(sem)) {
+    const Common::SlotId id{sem};
+    if (!orbis_sems.is_allocated(id)) {
+        LOG_WARNING(Lib_Kernel,
+                    "sceKernelSignalSema: thread '{}' signaled invalid sem[{}] -> ESRCH",
+                    g_curthread->name, sem);
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    if (!orbis_sems[sem]->Signal(signalCount)) {
+    if (!orbis_sems[id]->Signal(signalCount)) {
+        LOG_WARNING(Lib_Kernel,
+                    "sceKernelSignalSema: thread '{}' overflowed sem[{}] (count={}) -> EINVAL",
+                    g_curthread->name, sem, signalCount);
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
     return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceKernelPollSema(OrbisKernelSema sem, s32 needCount) {
-    if (!orbis_sems.is_allocated(sem)) {
+    const Common::SlotId id{sem};
+    if (!orbis_sems.is_allocated(id)) {
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    return orbis_sems[sem]->Wait(false, needCount, nullptr);
+    return orbis_sems[id]->Wait(false, needCount, nullptr);
 }
 
 s32 PS4_SYSV_ABI sceKernelCancelSema(OrbisKernelSema sem, s32 setCount, s32* pNumWaitThreads) {
-    if (!orbis_sems.is_allocated(sem)) {
+    const Common::SlotId id{sem};
+    if (!orbis_sems.is_allocated(id)) {
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    return orbis_sems[sem]->Cancel(setCount, pNumWaitThreads);
+    LOG_INFO(Lib_Kernel, "sceKernelCancelSema: thread '{}' canceled sem[{}] set_count={}",
+             g_curthread->name, sem, setCount);
+    return orbis_sems[id]->Cancel(setCount, pNumWaitThreads);
 }
 
 s32 PS4_SYSV_ABI sceKernelDeleteSema(OrbisKernelSema sem) {
-    if (!orbis_sems.is_allocated(sem)) {
+    const Common::SlotId id{sem};
+    if (!orbis_sems.is_allocated(id)) {
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    orbis_sems[sem]->Delete();
-    orbis_sems.erase(sem);
+    LOG_INFO(Lib_Kernel, "sceKernelDeleteSema: thread '{}' deleted sem[{}]", g_curthread->name,
+             sem);
+    orbis_sems[id]->Delete();
+    orbis_sems.erase(id);
     return ORBIS_OK;
 }
 
@@ -250,81 +326,101 @@ s32 PS4_SYSV_ABI posix_sem_init(PthreadSem** sem, s32 pshared, u32 value) {
         return -1;
     }
     if (sem != nullptr) {
-        *sem = new PthreadSem(static_cast<s32>(value));
+        auto implementation = std::make_shared<PthreadSem>(static_cast<s32>(value));
+        std::scoped_lock lock{pthread_sems_mutex};
+        if (const auto old = pthread_sems_by_handle.find(sem);
+            old != pthread_sems_by_handle.end()) {
+            pthread_sems_by_impl.erase(old->second.get());
+            pthread_sems_by_handle.erase(old);
+        }
+        *sem = implementation.get();
+        pthread_sems_by_impl.emplace(implementation.get(), implementation);
+        pthread_sems_by_handle.emplace(sem, std::move(implementation));
     }
     return 0;
 }
 
 s32 PS4_SYSV_ABI posix_sem_destroy(PthreadSem** sem) {
-    if (sem == nullptr || *sem == nullptr) {
+    auto implementation = GetPthreadSem(sem, false);
+    if (!implementation) {
         *__Error() = POSIX_EINVAL;
         return -1;
     }
-    delete *sem;
+
+    {
+        std::scoped_lock lock{pthread_sems_mutex};
+        pthread_sems_by_handle.erase(sem);
+        pthread_sems_by_impl.erase(implementation.get());
+    }
     *sem = nullptr;
     return 0;
 }
 
 s32 PS4_SYSV_ABI posix_sem_wait(PthreadSem** sem) {
-    if (sem == nullptr || *sem == nullptr) {
+    auto implementation = GetPthreadSem(sem, true);
+    if (!implementation) {
         *__Error() = POSIX_EINVAL;
         return -1;
     }
-    (*sem)->semaphore.acquire();
-    --(*sem)->value;
+    implementation->semaphore.acquire();
+    --implementation->value;
     return 0;
 }
 
 s32 PS4_SYSV_ABI posix_sem_trywait(PthreadSem** sem) {
-    if (sem == nullptr || *sem == nullptr) {
+    auto implementation = GetPthreadSem(sem, true);
+    if (!implementation) {
         *__Error() = POSIX_EINVAL;
         return -1;
     }
-    if (!(*sem)->semaphore.try_acquire()) {
+    if (!implementation->semaphore.try_acquire()) {
         *__Error() = POSIX_EAGAIN;
         return -1;
     }
-    --(*sem)->value;
+    --implementation->value;
     return 0;
 }
 
 s32 PS4_SYSV_ABI posix_sem_timedwait(PthreadSem** sem, const OrbisKernelTimespec* t) {
-    if (sem == nullptr || *sem == nullptr) {
+    auto implementation = GetPthreadSem(sem, true);
+    if (!implementation || t == nullptr) {
         *__Error() = POSIX_EINVAL;
         return -1;
     }
-    if (!(*sem)->semaphore.try_acquire_until(t->TimePoint())) {
+    if (!implementation->semaphore.try_acquire_until(t->TimePoint())) {
         *__Error() = POSIX_ETIMEDOUT;
         return -1;
     }
-    --(*sem)->value;
+    --implementation->value;
     return 0;
 }
 
 s32 PS4_SYSV_ABI posix_sem_post(PthreadSem** sem) {
-    if (sem == nullptr || *sem == nullptr) {
+    auto implementation = GetPthreadSem(sem, true);
+    if (!implementation) {
         *__Error() = POSIX_EINVAL;
         return -1;
     }
     // Atomically check for overflow and increment in one step.
-    s32 current = (*sem)->value.load();
+    s32 current = implementation->value.load();
     do {
         if (current == ORBIS_KERNEL_SEM_VALUE_MAX) {
             *__Error() = POSIX_EOVERFLOW;
             return -1;
         }
-    } while (!(*sem)->value.compare_exchange_weak(current, current + 1));
-    (*sem)->semaphore.release();
+    } while (!implementation->value.compare_exchange_weak(current, current + 1));
+    implementation->semaphore.release();
     return 0;
 }
 
 s32 PS4_SYSV_ABI posix_sem_getvalue(PthreadSem** sem, s32* sval) {
-    if (sem == nullptr || *sem == nullptr) {
+    auto implementation = GetPthreadSem(sem, true);
+    if (!implementation) {
         *__Error() = POSIX_EINVAL;
         return -1;
     }
     if (sval) {
-        *sval = (*sem)->value;
+        *sval = implementation->value;
     }
     return 0;
 }
@@ -421,6 +517,16 @@ void RegisterSemaphore(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("w5IHyvahg-o", "libScePosix", 1, "libkernel", posix_sem_timedwait);
     LIB_FUNCTION("IKP8typ0QUk", "libScePosix", 1, "libkernel", posix_sem_post);
     LIB_FUNCTION("Bq+LRV-N6Hk", "libScePosix", 1, "libkernel", posix_sem_getvalue);
+
+    // Some SDK/Unity builds import the POSIX semaphore NIDs from the libkernel library
+    // namespace instead of libScePosix. Both names refer to the same ABI and implementation.
+    LIB_FUNCTION("pDuPEf3m4fI", "libkernel", 1, "libkernel", posix_sem_init);
+    LIB_FUNCTION("cDW233RAwWo", "libkernel", 1, "libkernel", posix_sem_destroy);
+    LIB_FUNCTION("YCV5dGGBcCo", "libkernel", 1, "libkernel", posix_sem_wait);
+    LIB_FUNCTION("WBWzsRifCEA", "libkernel", 1, "libkernel", posix_sem_trywait);
+    LIB_FUNCTION("w5IHyvahg-o", "libkernel", 1, "libkernel", posix_sem_timedwait);
+    LIB_FUNCTION("IKP8typ0QUk", "libkernel", 1, "libkernel", posix_sem_post);
+    LIB_FUNCTION("Bq+LRV-N6Hk", "libkernel", 1, "libkernel", posix_sem_getvalue);
 
     LIB_FUNCTION("GEnUkDZoUwY", "libkernel", 1, "libkernel", scePthreadSemInit);
     LIB_FUNCTION("Vwc+L05e6oE", "libkernel", 1, "libkernel", scePthreadSemDestroy);

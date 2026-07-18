@@ -10,6 +10,9 @@
 #include "core/libraries/kernel/threads/pthread.h"
 #include "core/libraries/libs.h"
 #include "core/signals.h"
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+#include "core/cpu/fex_backend.h"
+#endif
 
 #ifdef _WIN64
 #include "common/ntapi.h"
@@ -191,8 +194,75 @@ std::array<OrbisKernelExceptionHandler, 130> Handlers{};
 Sigset g_sigintr{};
 
 #ifndef _WIN64
+static int OrbisToNativeSigactionFlags(int flags) {
+    // The PS4 values follow FreeBSD/Linux and are not ABI-compatible with
+    // Darwin (for example, PS4 SA_SIGINFO is Darwin SA_RESETHAND).  Always use
+    // a native three-argument trampoline, then translate each requested flag.
+    int native_flags = SA_SIGINFO;
+    if (flags & POSIX_SA_NOCLDSTOP) {
+        native_flags |= SA_NOCLDSTOP;
+    }
+#ifdef SA_NOCLDWAIT
+    if (flags & POSIX_SA_NOCLDWAIT) {
+        native_flags |= SA_NOCLDWAIT;
+    }
+#endif
+    if (flags & POSIX_SA_ONSTACK) {
+        native_flags |= SA_ONSTACK;
+    }
+    if (flags & POSIX_SA_RESTART) {
+        native_flags |= SA_RESTART;
+    }
+    if (flags & POSIX_SA_NODEFER) {
+        native_flags |= SA_NODEFER;
+    }
+    if (flags & POSIX_SA_RESETHAND) {
+        native_flags |= SA_RESETHAND;
+    }
+    return native_flags;
+}
+
+static int NativeToOrbisSigactionFlags(int flags) {
+    int orbis_flags = 0;
+    if (flags & SA_NOCLDSTOP) {
+        orbis_flags |= POSIX_SA_NOCLDSTOP;
+    }
+#ifdef SA_NOCLDWAIT
+    if (flags & SA_NOCLDWAIT) {
+        orbis_flags |= POSIX_SA_NOCLDWAIT;
+    }
+#endif
+    if (flags & SA_SIGINFO) {
+        orbis_flags |= POSIX_SA_SIGINFO;
+    }
+    if (flags & SA_ONSTACK) {
+        orbis_flags |= POSIX_SA_ONSTACK;
+    }
+    if (flags & SA_RESTART) {
+        orbis_flags |= POSIX_SA_RESTART;
+    }
+    if (flags & SA_NODEFER) {
+        orbis_flags |= POSIX_SA_NODEFER;
+    }
+    if (flags & SA_RESETHAND) {
+        orbis_flags |= POSIX_SA_RESETHAND;
+    }
+    return orbis_flags;
+}
+#endif
+
+#ifndef _WIN64
 void SigactionHandler(int native_signum, siginfo_t* inf, ucontext_t* raw_context) {
-    const auto handler = Handlers[NativeToOrbisSignal(native_signum)];
+    const s32 orbis_signum = NativeToOrbisSignal(native_signum);
+    const auto handler = Handlers[orbis_signum];
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+    if (handler) {
+        Core::CPU::FexBackend::Instance().QueueGuestSignal(
+            reinterpret_cast<VAddr>(handler), orbis_signum, native_signum,
+            inf ? reinterpret_cast<VAddr>(inf->si_addr) : 0, raw_context);
+    }
+    return;
+#else
     if (handler) {
         auto ctx = Ucontext{};
 #ifdef ARCH_X86_64
@@ -266,10 +336,11 @@ void SigactionHandler(int native_signum, siginfo_t* inf, ucontext_t* raw_context
 #else
         UNREACHABLE_MSG("SigactionHandler not implemented for current architecture.");
 #endif
-        handler(NativeToOrbisSignal(native_signum), &ctx);
+        handler(orbis_signum, &ctx);
     } else {
         UNREACHABLE_MSG("Unhandled exception");
     }
+#endif
 }
 #else
 void ExceptionHandler(void* arg1, void* arg2, void* arg3, PCONTEXT context) {
@@ -414,7 +485,7 @@ s32 PS4_SYSV_ABI posix_sigaction(s32 sig, Sigaction* act, Sigaction* oact) {
     LOG_INFO(Lib_Kernel, "called, sig: {}, native sig: {}", sig, native_sig);
     struct sigaction native_act{};
     if (act) {
-        native_act.sa_flags = act->sa_flags; // todo check compatibility, on Linux it seems fine
+        native_act.sa_flags = OrbisToNativeSigactionFlags(act->sa_flags);
         native_act.sa_sigaction =
             reinterpret_cast<decltype(native_act.sa_sigaction)>(SigactionHandler);
         if (!posix_sigisemptyset(&act->sa_mask)) {
@@ -422,8 +493,10 @@ s32 PS4_SYSV_ABI posix_sigaction(s32 sig, Sigaction* act, Sigaction* oact) {
         }
     }
     auto const prev_handler = Handlers[sig];
-    Handlers[sig] = reinterpret_cast<OrbisKernelExceptionHandler>(
-        act ? act->__sigaction_handler.sigaction : nullptr);
+    if (act) {
+        Handlers[sig] =
+            reinterpret_cast<OrbisKernelExceptionHandler>(act->__sigaction_handler.sigaction);
+    }
 
     if (native_sig == SIGSEGV || native_sig == SIGBUS || native_sig == SIGILL) {
         return ORBIS_OK; // These are handled in Core::SignalHandler
@@ -435,7 +508,7 @@ s32 PS4_SYSV_ABI posix_sigaction(s32 sig, Sigaction* act, Sigaction* oact) {
     struct sigaction native_oact{};
     s32 ret = sigaction(native_sig, act ? &native_act : nullptr, oact ? &native_oact : nullptr);
     if (oact) {
-        oact->sa_flags = native_oact.sa_flags;
+        oact->sa_flags = NativeToOrbisSigactionFlags(native_oact.sa_flags);
         oact->__sigaction_handler.sigaction =
             reinterpret_cast<decltype(oact->__sigaction_handler.sigaction)>(prev_handler);
         if (!sigisemptyset(&native_oact.sa_mask)) {
@@ -443,6 +516,9 @@ s32 PS4_SYSV_ABI posix_sigaction(s32 sig, Sigaction* act, Sigaction* oact) {
         }
     }
     if (ret < 0) {
+        if (act) {
+            Handlers[sig] = prev_handler;
+        }
         LOG_ERROR(Lib_Kernel, "sigaction failed: {}", strerror(errno));
         *__Error() = ErrnoToSceKernelError(errno);
         return ORBIS_FAIL;
@@ -569,8 +645,22 @@ s32 PS4_SYSV_ABI sceKernelDebugRaiseExceptionOnReleaseMode(u32 error, s64 unk) {
     return ORBIS_OK;
 }
 
+// libkernel NID `crb5j7mkk1c`. The C++ unwinder (libc++abi / gcc_s style) asks
+// for every stack frame whether the return address is the kernel-side signal
+// return trampoline, so that in that case it restores the full register context
+// from the signal frame instead of unwinding normally via DWARF.
+// The HLE unwind never runs through such a guest trampoline, so 0
+// ("no signal frame") is the correct answer. Previously this was only an aerolib
+// STUB that logged an error line per call and - since Unity/il2cpp throws a great
+// many C++ exceptions - flooded the log on Game:Main.
+s32 PS4_SYSV_ABI _is_signal_return(u64 /*pc*/) {
+    return 0;
+}
+
 void RegisterException(Core::Loader::SymbolsResolver* sym) {
     LIB_OBJ("nQVWJEGHObc", "libkernel", 1, "libkernel", &g_sigintr);
+
+    LIB_FUNCTION("crb5j7mkk1c", "libkernel", 1, "libkernel", _is_signal_return);
 
     LIB_FUNCTION("il03nluKfMk", "libkernel_unity", 1, "libkernel", sceKernelRaiseException);
     LIB_FUNCTION("WkwEd3N7w0Y", "libkernel_unity", 1, "libkernel",

@@ -27,6 +27,33 @@
 
 namespace Libraries::SysModule {
 
+constexpr auto ModulesToLoad = std::to_array<Core::SysModules>(
+    {{"libSceNgs2.sprx", &Libraries::Ngs2::RegisterLib},
+     {"libSceUlt.sprx", nullptr},
+     {"libSceRtc.sprx", &Libraries::Rtc::RegisterLib},
+     {"libSceJpegDec.sprx", nullptr},
+     {"libSceJpegEnc.sprx", &Libraries::JpegEnc::RegisterLib},
+     {"libScePngEnc.sprx", &Libraries::PngEnc::RegisterLib},
+     {"libSceJson.sprx", nullptr},
+     {"libSceJson2.sprx", nullptr},
+     {"libSceCesCs.sprx", nullptr},
+     {"libSceAt9Enc.sprx", nullptr},
+     {"libSceAudiodec.sprx", nullptr},
+     {"libSceAudiodecCpu.sprx", nullptr},
+     {"libSceAudiodecCpuDdp.sprx", nullptr},
+     {"libSceAudiodecCpuM4aac.sprx", nullptr},
+     {"libSceAudiodecCpuDtsHdLbr.sprx", nullptr},
+     {"libSceAudiodecCpuHevag.sprx", nullptr},
+     {"libSceFont.sprx", &Libraries::Font::RegisterLib},
+     {"libSceFontFt.sprx", &Libraries::FontFt::RegisterLib},
+     {"libSceFreeTypeOt.sprx", nullptr},
+     {"libSceFreeTypeOl.sprx", nullptr},
+     {"libSceFreeTypeOptOl.sprx", nullptr},
+     {"libSceRudp.sprx", &Libraries::Rudp::RegisterLib},
+     {"libSceWkFontConfig.sprx", nullptr},
+     {"libSceSystemGesture.sprx", &Libraries::SystemGesture::RegisterLib},
+     {"libSceXml.sprx", nullptr}});
+
 s32 getModuleHandle(s32 id, s32* handle) {
     if (id == 0) {
         return ORBIS_SYSMODULE_INVALID_ID;
@@ -213,33 +240,6 @@ s32 loadModuleInternal(s32 index, s32 argc, const void* argv, s32* res_out) {
         // We need to check a few things here.
         // First, check if this is a module we allow LLE for.
         static s32 stub_handle = 100;
-        constexpr auto ModulesToLoad = std::to_array<Core::SysModules>(
-            {{"libSceNgs2.sprx", &Libraries::Ngs2::RegisterLib},
-             {"libSceUlt.sprx", nullptr},
-             {"libSceRtc.sprx", &Libraries::Rtc::RegisterLib},
-             {"libSceJpegDec.sprx", nullptr},
-             {"libSceJpegEnc.sprx", &Libraries::JpegEnc::RegisterLib},
-             {"libScePngEnc.sprx", &Libraries::PngEnc::RegisterLib},
-             {"libSceJson.sprx", nullptr},
-             {"libSceJson2.sprx", nullptr},
-             {"libSceCesCs.sprx", nullptr},
-             {"libSceAt9Enc.sprx", nullptr},
-             {"libSceAudiodec.sprx", nullptr},
-             {"libSceAudiodecCpu.sprx", nullptr},
-             {"libSceAudiodecCpuDdp.sprx", nullptr},
-             {"libSceAudiodecCpuM4aac.sprx", nullptr},
-             {"libSceAudiodecCpuDtsHdLbr.sprx", nullptr},
-             {"libSceAudiodecCpuHevag.sprx", nullptr},
-             {"libSceFont.sprx", &Libraries::Font::RegisterLib},
-             {"libSceFontFt.sprx", &Libraries::FontFt::RegisterLib},
-             {"libSceFreeTypeOt.sprx", nullptr},
-             {"libSceFreeTypeOl.sprx", nullptr},
-             {"libSceFreeTypeOptOl.sprx", nullptr},
-             {"libSceRudp.sprx", &Libraries::Rudp::RegisterLib},
-             {"libSceWkFontConfig.sprx", nullptr},
-             {"libSceSystemGesture.sprx", &Libraries::SystemGesture::RegisterLib},
-             {"libSceXml.sprx", nullptr}});
-
         // Iterate through the allowed array
         const auto it = std::ranges::find_if(
             ModulesToLoad, [&](Core::SysModules module) { return mod_name == module.module_name; });
@@ -334,6 +334,33 @@ s32 loadModule(s32 id, s32 argc, const void* argv, s32* res_out) {
         }
     }
     return ORBIS_OK;
+}
+
+bool loadImportedModule(std::string_view module_name) {
+    std::string filename{module_name};
+    filename.append(".sprx");
+
+    if (!std::ranges::contains(ModulesToLoad, filename, &Core::SysModules::module_name)) {
+        return false;
+    }
+
+    const auto module = std::ranges::find_if(g_modules_array, [&](const auto& candidate) {
+        return candidate.id != 0 && candidate.name != nullptr && candidate.name == module_name;
+    });
+    if (module == g_modules_array.end()) {
+        return false;
+    }
+    if (module->is_loaded > 0) {
+        return true;
+    }
+
+    LOG_INFO(Lib_SysModule, "Preloading imported module {}", module_name);
+    const s32 result = loadModule(module->id, 0, nullptr, nullptr);
+    if (result != ORBIS_OK) {
+        LOG_ERROR(Lib_SysModule, "Failed to preload imported module {}: {:#x}", module_name,
+                  result);
+    }
+    return result == ORBIS_OK;
 }
 
 s32 unloadModule(s32 id, s32 argc, const void* argv, s32* res_out, bool is_internal) {

@@ -47,4 +47,17 @@ bool IsWriteError(void* ctx) {
 #endif
 }
 
+bool IsAlignmentError(void* ctx) {
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+    // ESR_EL1.ISS.DFSC = 0b100001 identifies an alignment fault from a data access.
+    constexpr u64 DataFaultStatusMask = 0x3f;
+    constexpr u64 AlignmentFault = 0x21;
+    const u64 esr = ((ucontext_t*)ctx)->uc_mcontext->__es.__esr;
+    return (esr & DataFaultStatusMask) == AlignmentFault;
+#else
+    (void)ctx;
+    return false;
+#endif
+}
+
 } // namespace Common

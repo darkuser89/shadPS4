@@ -242,6 +242,9 @@ public:
     ThreadLocalImage tls{};
     OrbisKernelModuleInfo info{};
     std::vector<u8> rela_bits;
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+    bool fex_plt_normalized{};
+#endif
 };
 
 } // namespace Core

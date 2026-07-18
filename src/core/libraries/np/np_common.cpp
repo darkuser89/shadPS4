@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstring>
 #include "common/logging/log.h"
+#include "core/cpu/guest_callback.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/process.h"
@@ -67,7 +68,7 @@ void* PS4_SYSV_ABI NpCalloutThreadMain(void* arg) {
                 ctx->head = entry->next;
                 sceNpMutexUnlock(mutex);
                 if (entry->handler != nullptr) {
-                    entry->handler(entry->arg);
+                    Core::CPU::InvokeGuestOrHost(entry->handler, entry->arg);
                 }
                 sceNpMutexLock(mutex);
                 continue;

@@ -601,7 +601,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
 
     for (const auto& desc : stage.buffers) {
         const auto vsharp = desc.GetSharp(stage);
-        if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0) {
+        // Hardening: the PS4 GPU only addresses 40 bits. A V# base address
+        // outside this range is guaranteed to be garbage (e.g. from an
+        // uninitialized descriptor). Do not forward such resources to the
+        // backend/Metal driver; bind them as empty instead.
+        if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0 &&
+            memory->IsValidGpuMapping(vsharp.base_address, vsharp.GetSize()) &&
+            memory->IsValidMapping(vsharp.base_address, vsharp.GetSize())) {
             const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
             const auto buffer_id = buffer_cache.FindBuffer(vsharp.base_address, size);
             buffer_bindings.emplace_back(buffer_id, vsharp, size);
@@ -687,11 +693,26 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
     for (const auto& image_desc : stage.images) {
         const auto tsharp = image_desc.GetSharp(stage);
-        if (texture_cache.IsMeta(tsharp.Address())) {
+        const VAddr texture_address = tsharp.Address();
+        if (texture_cache.IsMeta(texture_address)) {
             LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a shader (texture)");
         }
 
-        if (tsharp.Address() == 0 || tsharp.GetDataFmt() == AmdGpu::DataFormat::FormatInvalid) {
+        const bool has_valid_address =
+            memory->IsValidGpuMapping(texture_address, 1) &&
+            memory->IsValidMapping(texture_address, 1);
+        if (texture_address == 0 || tsharp.GetDataFmt() == AmdGpu::DataFormat::FormatInvalid ||
+            !has_valid_address) {
+            // A 40-bit value is not necessarily a mapped guest address. Reject stale,
+            // truncated, or otherwise malformed T# descriptors before they enter the
+            // texture cache. CopySparseMemory retains a second check for unmap races.
+            if (texture_address != 0 &&
+                tsharp.GetDataFmt() != AmdGpu::DataFormat::FormatInvalid && !has_valid_address) {
+                LOG_WARNING(Render_Vulkan,
+                            "Ignoring texture descriptor with invalid guest address {:#x} "
+                            "(encoded base {:#x})",
+                            texture_address, tsharp.base_address);
+            }
             image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
             image_descriptor_array_sizes.push_back(1);
             continue;

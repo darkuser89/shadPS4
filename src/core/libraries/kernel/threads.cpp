@@ -17,6 +17,7 @@ void RegisterThreads(Core::Loader::SymbolsResolver* sym) {
     RegisterThread(sym);
     RegisterRtld(sym);
     RegisterPthreadClean(sym);
+    RegisterUmtx(sym);
 }
 
 } // namespace Libraries::Kernel

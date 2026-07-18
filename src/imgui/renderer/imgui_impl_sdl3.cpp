@@ -3,7 +3,14 @@
 
 // Based on imgui_impl_sdl3.cpp from Dear ImGui repository
 
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <numeric>
+#include <vector>
+
 #include <imgui.h>
+#include "common/logging/log.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -56,6 +63,47 @@ struct SdlData {
     int framerateSecPerFrameIdx{};
     float framerateSecPerFrameAcc{};
 };
+
+// Frametime diagnostics for backend A/B tests. Active only when SHAD_FRAMETIME_CSV
+// names an output file: appends one "ms_since_start,frame_ms" line per presented
+// frame and logs avg / 1%-low / worst frame every 5 seconds.
+static void RecordFrametime(float delta_sec) {
+    static FILE* csv = [] {
+        const char* path = std::getenv("SHAD_FRAMETIME_CSV");
+        FILE* f = path ? std::fopen(path, "w") : nullptr;
+        if (f) {
+            std::fputs("ms_since_start,frame_ms\n", f);
+        }
+        return f;
+    }();
+    if (!csv) {
+        return;
+    }
+    static Uint64 t0 = SDL_GetPerformanceCounter();
+    static std::vector<float> window_frames;
+    static Uint64 window_start = t0;
+    const Uint64 now = SDL_GetPerformanceCounter();
+    const double freq = static_cast<double>(SDL_GetPerformanceFrequency());
+    std::fprintf(csv, "%.1f,%.3f\n", (now - t0) / freq * 1e3, delta_sec * 1e3);
+    window_frames.push_back(delta_sec);
+    if ((now - window_start) / freq < 5.0) {
+        return;
+    }
+    std::vector<float> sorted = window_frames;
+    std::sort(sorted.begin(), sorted.end());
+    const double total = std::accumulate(sorted.begin(), sorted.end(), 0.0);
+    const float avg_fps = sorted.size() / total;
+    // 1%-low FPS: mean of the slowest 1% of frames, expressed as a rate.
+    const size_t worst_count = std::max<size_t>(1, sorted.size() / 100);
+    const double worst_sum =
+        std::accumulate(sorted.end() - worst_count, sorted.end(), 0.0);
+    const float low1_fps = worst_count / worst_sum;
+    LOG_INFO(ImGui, "Frametime: {} frames, avg {:.1f} fps, 1%-low {:.1f} fps, worst {:.1f} ms",
+             window_frames.size(), avg_fps, low1_fps, sorted.back() * 1e3);
+    std::fflush(csv);
+    window_frames.clear();
+    window_start = now;
+}
 
 // Backend data stored in io.BackendPlatformUserData to allow support for multiple Dear ImGui
 // contexts It is STRONGLY preferred that you use docking branch with multi-viewports (== single
@@ -831,6 +879,7 @@ void NewFrame(bool is_reusing_frame) {
                 : 1.0f / 60.0f;
         bd->nonReusedtime = current_time;
         DebugState.FrameDeltaTime = deltaTime;
+        RecordFrametime(deltaTime);
 
         int& frameIdx = bd->framerateSecPerFrameIdx;
         float& framerateSec = bd->framerateSecPerFrame[frameIdx];

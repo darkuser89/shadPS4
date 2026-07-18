@@ -296,7 +296,11 @@ int PS4_SYSV_ABI sceAppContentInitialize(const OrbisAppContentInitParam* initPar
     if (const auto value = param_sfo->GetString("TITLE_ID"); value.has_value()) {
         title_id = *value;
     } else {
-        UNREACHABLE_MSG("Failed to get TITLE_ID");
+        // Homebrew and incomplete dumps do not necessarily provide a param.sfo. There cannot be
+        // title-specific add-on content to discover in that case, but initialization itself is
+        // still allowed to succeed.
+        LOG_WARNING(Lib_AppContent, "TITLE_ID is unavailable; skipping add-on discovery");
+        return ORBIS_OK;
     }
     const auto addon_path = addons_dir / title_id;
     if (!std::filesystem::exists(addon_path)) {

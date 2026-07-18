@@ -9,6 +9,9 @@
 #include "common/sha1.h"
 #include "common/string_util.h"
 #include "core/aerolib/aerolib.h"
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+#include "core/cpu/fex_backend.h"
+#endif
 #include "core/cpu_patches.h"
 #include "core/libraries/error_codes.h"
 #include "core/loader/dwarf.h"
@@ -98,7 +101,13 @@ Module::~Module() = default;
 s32 Module::Start(u64 args, const void* argp, void* param) {
     LOG_INFO(Core_Linker, "Module started : {}", name);
     const VAddr addr = dynamic_info.init_virtual_addr + GetBaseAddress();
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+    // Guest x86-64 module_start can't be called directly on ARM64; run it through FEXCore.
+    return static_cast<s32>(Core::CPU::FexBackend::Instance().CallGuestFunction(
+        addr, args, reinterpret_cast<u64>(argp), reinterpret_cast<u64>(param)));
+#else
     return reinterpret_cast<EntryFunc>(addr)(args, argp, param);
+#endif
 }
 
 void Module::LoadModuleToMemory(u32& max_tls_index) {

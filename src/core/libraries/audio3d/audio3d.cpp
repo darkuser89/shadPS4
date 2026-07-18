@@ -102,8 +102,7 @@ s32 PS4_SYSV_ABI sceAudio3dAudioOutClose(const s32 handle) {
 
 s32 PS4_SYSV_ABI sceAudio3dAudioOutOpen(
     const OrbisAudio3dPortId port_id, const Libraries::UserService::OrbisUserServiceUserId user_id,
-    s32 type, const s32 index, const u32 len, const u32 freq,
-    const AudioOut::OrbisAudioOutParamExtendedInformation param) {
+    s32 type, const s32 index, const u32 len, const u32 freq, const u32 param_raw) {
     LOG_INFO(Lib_Audio3d,
              "called, port_id = {}, user_id = {}, type = {}, index = {}, len = {}, freq = {}",
              port_id, user_id, type, index, len, freq);
@@ -120,11 +119,14 @@ s32 PS4_SYSV_ABI sceAudio3dAudioOutOpen(
     }
 
     const s32 handle = sceAudioOutOpen(user_id, static_cast<AudioOut::OrbisAudioOutPort>(type),
-                                       index, len, freq, param);
+                                       index, len, freq, param_raw);
     if (handle < 0) {
         return handle;
     }
 
+    AudioOut::OrbisAudioOutParamExtendedInformation param{};
+    static_assert(sizeof(param) == sizeof(param_raw));
+    std::memcpy(&param, &param_raw, sizeof(param));
     const auto info = GetAudioOutBufferInfo(param.data_format.Value());
     AssociatedAudioOutPort aout{};
     aout.handle = handle;
@@ -850,7 +852,8 @@ s32 PS4_SYSV_ABI sceAudio3dPortFlush(const OrbisAudio3dPortId port_id) {
         ext_info.data_format.Assign(AUDIO3D_OUTPUT_FORMAT);
         port.audio_out_handle =
             AudioOut::sceAudioOutOpen(0xFF, AudioOut::OrbisAudioOutPort::Audio3d, 0,
-                                      port.parameters.granularity, AUDIO3D_SAMPLE_RATE, ext_info);
+                                      port.parameters.granularity, AUDIO3D_SAMPLE_RATE,
+                                      ext_info.Unpack());
         if (port.audio_out_handle < 0) {
             return port.audio_out_handle;
         }
@@ -1132,7 +1135,8 @@ s32 PS4_SYSV_ABI sceAudio3dPortPush(const OrbisAudio3dPortId port_id,
 
         port.audio_out_handle =
             AudioOut::sceAudioOutOpen(0xFF, AudioOut::OrbisAudioOutPort::Audio3d, 0,
-                                      port.parameters.granularity, AUDIO3D_SAMPLE_RATE, ext_info);
+                                      port.parameters.granularity, AUDIO3D_SAMPLE_RATE,
+                                      ext_info.Unpack());
 
         if (port.audio_out_handle < 0)
             return port.audio_out_handle;

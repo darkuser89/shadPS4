@@ -3,6 +3,7 @@
 
 #include "dimensions.h"
 
+#include "core/cpu/guest_callback.h"
 #include "core/libraries/kernel/threads.h"
 #include "core/tls.h"
 
@@ -639,7 +640,7 @@ void* PS4_SYSV_ABI DimensionsBackend::WriteThread(void* arg) {
     transfer->status = LIBUSB_TRANSFER_COMPLETED;
     transfer->actual_length = transfer->length;
     if (transfer->callback) {
-        transfer->callback(transfer);
+        Core::CPU::InvokeGuestOrHost(transfer->callback, transfer);
     }
     if (flags & LIBUSB_TRANSFER_FREE_TRANSFER) {
         libusb_free_transfer(transfer);

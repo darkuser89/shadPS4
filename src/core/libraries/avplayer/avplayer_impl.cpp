@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "core/cpu/guest_callback.h"
 #include "core/libraries/avplayer/avplayer_common.h"
 #include "core/libraries/avplayer/avplayer_error.h"
 #include "core/libraries/avplayer/avplayer_impl.h"
@@ -11,28 +12,28 @@ void* PS4_SYSV_ABI AvPlayer::Allocate(void* handle, u32 alignment, u32 size) {
     const auto* const self = reinterpret_cast<AvPlayer*>(handle);
     const auto allocate = self->m_init_data_original.memory_replacement.allocate;
     const auto ptr = self->m_init_data_original.memory_replacement.object_ptr;
-    return allocate(ptr, alignment, size);
+    return Core::CPU::InvokeGuestOrHost(allocate, ptr, alignment, size);
 }
 
 void PS4_SYSV_ABI AvPlayer::Deallocate(void* handle, void* memory) {
     const auto* const self = reinterpret_cast<AvPlayer*>(handle);
     const auto deallocate = self->m_init_data_original.memory_replacement.deallocate;
     const auto ptr = self->m_init_data_original.memory_replacement.object_ptr;
-    return deallocate(ptr, memory);
+    return Core::CPU::InvokeGuestOrHost(deallocate, ptr, memory);
 }
 
 void* PS4_SYSV_ABI AvPlayer::AllocateTexture(void* handle, u32 alignment, u32 size) {
     const auto* const self = reinterpret_cast<AvPlayer*>(handle);
     const auto allocate = self->m_init_data_original.memory_replacement.allocate_texture;
     const auto ptr = self->m_init_data_original.memory_replacement.object_ptr;
-    return allocate(ptr, alignment, size);
+    return Core::CPU::InvokeGuestOrHost(allocate, ptr, alignment, size);
 }
 
 void PS4_SYSV_ABI AvPlayer::DeallocateTexture(void* handle, void* memory) {
     const auto* const self = reinterpret_cast<AvPlayer*>(handle);
     const auto deallocate = self->m_init_data_original.memory_replacement.deallocate_texture;
     const auto ptr = self->m_init_data_original.memory_replacement.object_ptr;
-    return deallocate(ptr, memory);
+    return Core::CPU::InvokeGuestOrHost(deallocate, ptr, memory);
 }
 
 int PS4_SYSV_ABI AvPlayer::OpenFile(void* handle, const char* filename) {
@@ -41,7 +42,7 @@ int PS4_SYSV_ABI AvPlayer::OpenFile(void* handle, const char* filename) {
 
     const auto open = self->m_init_data_original.file_replacement.open;
     const auto ptr = self->m_init_data_original.file_replacement.object_ptr;
-    return open(ptr, filename);
+    return Core::CPU::InvokeGuestOrHost(open, ptr, filename);
 }
 
 int PS4_SYSV_ABI AvPlayer::CloseFile(void* handle) {
@@ -50,7 +51,7 @@ int PS4_SYSV_ABI AvPlayer::CloseFile(void* handle) {
 
     const auto close = self->m_init_data_original.file_replacement.close;
     const auto ptr = self->m_init_data_original.file_replacement.object_ptr;
-    return close(ptr);
+    return Core::CPU::InvokeGuestOrHost(close, ptr);
 }
 
 int PS4_SYSV_ABI AvPlayer::ReadOffsetFile(void* handle, u8* buffer, u64 position, u32 length) {
@@ -59,7 +60,7 @@ int PS4_SYSV_ABI AvPlayer::ReadOffsetFile(void* handle, u8* buffer, u64 position
 
     const auto read_offset = self->m_init_data_original.file_replacement.read_offset;
     const auto ptr = self->m_init_data_original.file_replacement.object_ptr;
-    return read_offset(ptr, buffer, position, length);
+    return Core::CPU::InvokeGuestOrHost(read_offset, ptr, buffer, position, length);
 }
 
 u64 PS4_SYSV_ABI AvPlayer::SizeFile(void* handle) {
@@ -68,7 +69,7 @@ u64 PS4_SYSV_ABI AvPlayer::SizeFile(void* handle) {
 
     const auto size = self->m_init_data_original.file_replacement.size;
     const auto ptr = self->m_init_data_original.file_replacement.object_ptr;
-    return size(ptr);
+    return Core::CPU::InvokeGuestOrHost(size, ptr);
 }
 
 AvPlayerInitData AvPlayer::StubInitData(const AvPlayerInitData& data) {
@@ -162,6 +163,13 @@ s32 AvPlayer::Pause() {
 
 s32 AvPlayer::Resume() {
     if (m_state == nullptr || !m_state->Resume()) {
+        return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED;
+    }
+    return ORBIS_OK;
+}
+
+s32 AvPlayer::JumpToTime(u64 time_msec) {
+    if (m_state == nullptr || !m_state->JumpToTime(time_msec)) {
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED;
     }
     return ORBIS_OK;

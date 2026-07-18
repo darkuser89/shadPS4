@@ -7,6 +7,7 @@
 #include "common/alignment.h"
 #include "common/logging/log.h"
 #include "common/singleton.h"
+#include "core/cpu/guest_callback.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/memory.h"
@@ -476,8 +477,10 @@ static void DispatchThreadMain() {
                       dispatch.conn_id, dispatch.event_type,
                       SignalingEventName(dispatch.event_type), dispatch.error_code,
                       fmt::ptr(dispatch.callback_arg));
-            dispatch.callback(static_cast<u32>(dispatch.ctx_id), static_cast<u32>(dispatch.conn_id),
-                              dispatch.event_type, dispatch.error_code, dispatch.callback_arg);
+            Core::CPU::InvokeGuestOrHost(
+                dispatch.callback, static_cast<u32>(dispatch.ctx_id),
+                static_cast<u32>(dispatch.conn_id), dispatch.event_type, dispatch.error_code,
+                dispatch.callback_arg);
         }
     }
 }

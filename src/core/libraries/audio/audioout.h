@@ -178,7 +178,7 @@ s32 PS4_SYSV_ABI sceAudioOutMasteringTerm();
 s32 PS4_SYSV_ABI sceAudioOutMbusInit();
 s32 PS4_SYSV_ABI sceAudioOutOpen(UserService::OrbisUserServiceUserId user_id,
                                  OrbisAudioOutPort port_type, s32 index, u32 length,
-                                 u32 sample_rate, OrbisAudioOutParamExtendedInformation param_type);
+                                 u32 sample_rate, u32 param_type_raw);
 s32 PS4_SYSV_ABI sceAudioOutOpenEx();
 s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr);
 s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num);

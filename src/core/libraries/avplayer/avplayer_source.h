@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -154,6 +155,7 @@ public:
     std::optional<bool> HasFrames(u32 num_frames);
     bool Start();
     bool Stop();
+    bool JumpToTime(u64 time_msec);
     void Pause();
     void Resume();
     bool GetAudioData(AvPlayerFrameInfo& audio_info);
@@ -214,6 +216,7 @@ private:
 
     std::optional<Frame> m_current_video_frame;
     std::optional<Frame> m_current_audio_frame;
+    std::deque<Frame> m_retired_video_frames;
 
     std::optional<s32> m_video_stream_index{};
     std::optional<s32> m_audio_stream_index{};
@@ -238,6 +241,7 @@ private:
     SWSContextPtr m_sws_context{nullptr, &ReleaseSWSContext};
 
     std::optional<u64> m_last_audio_ts{};
+    u64 m_seek_time_msec{};
     std::optional<std::chrono::high_resolution_clock::time_point> m_start_time{};
     std::chrono::high_resolution_clock::time_point m_pause_time{};
     std::chrono::high_resolution_clock::duration m_pause_duration{};

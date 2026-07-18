@@ -3,6 +3,9 @@
 
 #include "core/libraries/kernel/threads/pthread.h"
 #include "core/libraries/libs.h"
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+#include "core/cpu/fex_backend.h"
+#endif
 
 namespace Libraries::Kernel {
 
@@ -33,7 +36,17 @@ void PS4_SYSV_ABI posix_pthread_cleanup_pop(int execute) {
         PthreadCleanup* old = curthread->cleanup.front();
         curthread->cleanup.pop_front();
         if (execute) {
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+            auto& fex = Core::CPU::FexBackend::Instance();
+            const VAddr routine_addr = reinterpret_cast<VAddr>(old->routine);
+            if (fex.IsGuestAddress(routine_addr)) {
+                fex.CallGuestCallback(routine_addr, reinterpret_cast<u64>(old->routine_arg));
+            } else {
+                old->routine(old->routine_arg);
+            }
+#else
             old->routine(old->routine_arg);
+#endif
         }
         if (old->onheap) {
             delete old;

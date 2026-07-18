@@ -225,7 +225,15 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     // Certain games may use /hostapp as well such as CUSA001100
     mnt->Mount(game_folder, "/hostapp", true);
 
-    const auto param_sfo_path = mnt->GetHostPath("/app0/sce_sys/param.sfo");
+    auto param_sfo_path = mnt->GetHostPath("/app0/sce_sys/param.sfo");
+    if (!std::filesystem::exists(param_sfo_path)) {
+        // Some decrypted/extracted dumps place sce_sys metadata directly in the game root.
+        // Accept that layout as well so the title metadata is available to HLE libraries.
+        const auto flat_param_sfo_path = mnt->GetHostPath("/app0/param.sfo");
+        if (std::filesystem::exists(flat_param_sfo_path)) {
+            param_sfo_path = flat_param_sfo_path;
+        }
+    }
     const auto param_sfo_exists = std::filesystem::exists(param_sfo_path);
 
     // Load param.sfo details if it exists

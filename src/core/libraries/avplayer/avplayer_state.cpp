@@ -4,6 +4,7 @@
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/thread.h"
+#include "core/cpu/guest_callback.h"
 #include "core/libraries/avplayer/avplayer_error.h"
 #include "core/libraries/avplayer/avplayer_state.h"
 #include "core/libraries/kernel/process.h"
@@ -92,7 +93,7 @@ void AvPlayerState::DefaultEventCallback(void* opaque, AvPlayerEvents event_id, 
     const auto callback = self->m_event_replacement.event_callback;
     const auto ptr = self->m_event_replacement.object_ptr;
     if (callback != nullptr) {
-        callback(ptr, event_id, 0, event_data);
+        Core::CPU::InvokeGuestOrHost(callback, ptr, event_id, 0, event_data);
     }
 }
 
@@ -229,6 +230,17 @@ bool AvPlayerState::Resume() {
     SetState(state);
     OnPlaybackStateChanged(state);
     return true;
+}
+
+bool AvPlayerState::JumpToTime(u64 time_msec) {
+    std::shared_lock lock(m_source_mutex);
+    if (m_up_source == nullptr || m_current_state == AvState::Initial ||
+        m_current_state == AvState::AddingSource || m_current_state == AvState::Ready ||
+        m_current_state == AvState::Stop || m_current_state == AvState::Error) {
+        LOG_ERROR(Lib_AvPlayer, "Could not jump to {} ms in the current state.", time_msec);
+        return false;
+    }
+    return m_up_source->JumpToTime(time_msec);
 }
 
 void AvPlayerState::SetAvSyncMode(AvPlayerAvSyncMode sync_mode) {
@@ -436,7 +448,7 @@ void AvPlayerState::EmitEvent(AvPlayerEvents event_id, void* event_data) {
     const auto callback = m_init_data.event_replacement.event_callback;
     if (callback) {
         const auto ptr = m_init_data.event_replacement.object_ptr;
-        callback(ptr, event_id, 0, event_data);
+        Core::CPU::InvokeGuestOrHost(callback, ptr, event_id, 0, event_data);
     }
 }
 

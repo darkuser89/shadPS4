@@ -5,6 +5,7 @@
 #include <cstring>
 #include <queue>
 #include "common/logging/log.h"
+#include "core/cpu/guest_callback.h"
 #include "core/libraries/ime/ime.h"
 #include "core/libraries/ime/ime_dialog.h"
 #include "core/libraries/ime/ime_error.h"
@@ -257,7 +258,7 @@ public:
                 LOG_ERROR(Lib_Ime, "ImeHandler::Execute called with null IME callback");
                 return;
             }
-            callback(param.arg, event);
+            Core::CPU::InvokeGuestOrHost(callback, param.arg, event);
         } else {
             OrbisImeKeyboardParam param = m_param.key;
             const OrbisImeEventHandler callback = use_param_handler ? param.handler : handler;
@@ -265,7 +266,7 @@ public:
                 LOG_ERROR(Lib_Ime, "ImeHandler::Execute called with null keyboard callback");
                 return;
             }
-            callback(param.arg, event);
+            Core::CPU::InvokeGuestOrHost(callback, param.arg, event);
         }
     }
 

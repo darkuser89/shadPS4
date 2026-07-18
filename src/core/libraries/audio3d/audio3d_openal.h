@@ -209,7 +209,7 @@ s32 PS4_SYSV_ABI sceAudio3dAudioOutClose(s32 handle);
 s32 PS4_SYSV_ABI sceAudio3dAudioOutOpen(OrbisAudio3dPortId port_id,
                                         Libraries::UserService::OrbisUserServiceUserId user_id,
                                         s32 type, s32 index, u32 len, u32 freq,
-                                        AudioOut::OrbisAudioOutParamExtendedInformation param);
+                                        u32 param_raw);
 s32 PS4_SYSV_ABI sceAudio3dAudioOutOutput(s32 handle, void* ptr);
 s32 PS4_SYSV_ABI sceAudio3dAudioOutOutputs(AudioOut::OrbisAudioOutOutputParam* param, u32 num);
 s32 PS4_SYSV_ABI sceAudio3dBedWrite(OrbisAudio3dPortId port_id, u32 num_channels,

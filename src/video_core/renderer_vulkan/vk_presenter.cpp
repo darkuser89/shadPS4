@@ -629,17 +629,16 @@ Frame* Presenter::PrepareLastFrame() {
 
     Frame* frame = last_submit_frame;
 
-    while (true) {
-        vk::Result result = instance.GetDevice().waitForFences(frame->present_done, false,
-                                                               std::numeric_limits<u64>::max());
-        if (result == vk::Result::eSuccess) {
-            break;
-        }
-        if (result == vk::Result::eTimeout) {
-            continue;
-        }
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
+    // Redrawing the previous frame is cosmetic (ImGui overlay updates); the last
+    // present stays on screen either way. Blocking here until the previous
+    // present's fence signals would stall the present thread for a swapchain
+    // period per redraw and delay real game flips behind it, so skip the redraw
+    // instead while the frame is still in flight.
+    const vk::Result fence_status = instance.GetDevice().getFenceStatus(frame->present_done);
+    if (fence_status != vk::Result::eSuccess) {
+        ASSERT_MSG(fence_status != vk::Result::eErrorDeviceLost,
                    "Device lost during waiting for a frame");
+        return nullptr;
     }
 
     auto& scheduler = flip_scheduler;

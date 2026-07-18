@@ -88,9 +88,13 @@ public:
         return thread != nullptr;
     }
 
+    void RequestStop() {
+        stop.request_stop();
+    }
+
     void Stop() {
         if (Joinable()) {
-            stop.request_stop();
+            RequestStop();
             Join();
         }
         thread = nullptr;

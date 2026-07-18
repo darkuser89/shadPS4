@@ -217,8 +217,10 @@ s32 PS4_SYSV_ABI sceAudioOutInit() {
 
 s32 PS4_SYSV_ABI sceAudioOutOpen(UserService::OrbisUserServiceUserId user_id,
                                  OrbisAudioOutPort port_type, s32 index, u32 length,
-                                 u32 sample_rate,
-                                 OrbisAudioOutParamExtendedInformation param_type) {
+                                 u32 sample_rate, u32 param_type_raw) {
+    OrbisAudioOutParamExtendedInformation param_type{};
+    static_assert(sizeof(param_type) == sizeof(param_type_raw));
+    std::memcpy(&param_type, &param_type_raw, sizeof(param_type));
     LOG_INFO(Lib_AudioOut,
              "called, user_id={}, port_type={}({}), index={}, length={}, "
              "sample_rate={}, data_format={}({}), attributes={}({})",
@@ -239,7 +241,7 @@ s32 PS4_SYSV_ABI sceAudioOutOpen(UserService::OrbisUserServiceUserId user_id,
     }
 
     s32 _type = static_cast<s32>(port_type);
-    u32 param_raw = param_type.Unpack();
+    const u32 param_raw = param_type_raw;
 
     // Extract attributes
     bool is_restricted = (param_raw & ORBIS_AUDIO_OUT_PARAM_ATTR_RESTRICTED) != 0;

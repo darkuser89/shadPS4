@@ -338,6 +338,7 @@ set(KERNEL_LIB src/core/libraries/kernel/coredump/coredump.cpp
                src/core/libraries/kernel/threads/sleepq.h
                src/core/libraries/kernel/threads/stack.cpp
                src/core/libraries/kernel/threads/tcb.cpp
+               src/core/libraries/kernel/threads/umtx.cpp
                src/core/libraries/kernel/threads/pthread.h
                src/core/libraries/kernel/threads/thread_state.cpp
                src/core/libraries/kernel/threads/thread_state.h
@@ -541,7 +542,6 @@ set(HLE_LIBC_INTERNAL_LIB src/core/libraries/libc_internal/libc_internal.cpp
                  src/core/libraries/libc_internal/libc_internal_threads.h
                  src/core/libraries/libc_internal/printf.h
 )
-
 set(IME_LIB src/core/libraries/ime/error_dialog.cpp
             src/core/libraries/ime/error_dialog.h
             src/core/libraries/ime/ime_common.h
@@ -943,6 +943,53 @@ if (ARCHITECTURE STREQUAL "x86_64")
              ${FIBER_LIB})
 endif()
 
+# Native ARM64 x86-64 execution via FEXCore (replaces Rosetta 2). Opt-in and
+# off by default: needs a macOS-ported libFEXCore.a on the include/link path
+# (see INTEGRATION.md). Does not affect the default build.
+option(ENABLE_FEX_CPU "Use the FEXCore JIT as the ARM64 CPU backend" OFF)
+# Point at a built FEXCore (macOS-ported) tree, e.g. -DFEXCORE_DIR=/path/to/FEX
+set(FEXCORE_DIR "" CACHE PATH "Root of a built FEXCore source+build tree")
+if (ARCHITECTURE STREQUAL "arm64" AND ENABLE_FEX_CPU)
+    set(CORE ${CORE}
+             src/core/cpu/a64_ls_emulator.cpp
+             src/core/cpu/a64_ls_emulator.h
+             src/core/cpu/fex_backend.cpp
+             src/core/cpu/fex_backend.h
+             src/core/cpu/guest_callback.h
+             src/core/cpu/fex_hle.h
+             src/core/cpu/fex_thunks.h
+             src/core/libraries/fiber/fiber_fex.cpp
+             src/core/libraries/fiber/fiber.h
+             src/core/libraries/fiber/fiber_error.h)
+    if (NOT FEXCORE_DIR)
+        message(FATAL_ERROR "ENABLE_FEX_CPU requires -DFEXCORE_DIR=<built FEX tree>")
+    endif()
+    # Applied globally (guarded) so the fex_backend TU can see FEXCore headers.
+    include_directories(
+        ${FEXCORE_DIR}/FEXCore/include ${FEXCORE_DIR}/build/include
+        ${FEXCORE_DIR}/build/FEXCore/Source ${FEXCORE_DIR}/FEXCore/Source/IncludePrivate
+        ${FEXCORE_DIR}/FEXHeaderUtils ${FEXCORE_DIR}/CodeEmitter
+        ${FEXCORE_DIR}/External/robin-map/include
+        ${FEXCORE_DIR}/External/unordered_dense/include)
+    add_compile_definitions(_M_ARM_64=1 FEX_DISABLE_TELEMETRY=1 SHAD_ENABLE_FEX=1)
+    # Include + link recipe verified to compile+link fex_backend.cpp against a real
+    # libFEXCore.a on Apple Silicon (see INTEGRATION.md "Build-Verifikation").
+    #   target_include_directories(shadps4 PRIVATE
+    #       ${FEXCORE_DIR}/FEXCore/include ${FEXCORE_DIR}/build/include
+    #       ${FEXCORE_DIR}/build/FEXCore/Source ${FEXCORE_DIR}/FEXCore/Source/IncludePrivate
+    #       ${FEXCORE_DIR}/FEXHeaderUtils ${FEXCORE_DIR}/CodeEmitter
+    #       ${FEXCORE_DIR}/External/robin-map/include
+    #       ${FEXCORE_DIR}/External/unordered_dense/include)
+    #   target_compile_definitions(shadps4 PRIVATE _M_ARM_64=1 FEX_DISABLE_TELEMETRY=1)
+    #   target_link_libraries(shadps4 PRIVATE
+    #       ${FEXCORE_DIR}/build/FEXCore/Source/libFEXCore.a
+    #       ${FEXCORE_DIR}/build/FEXCore/Source/libFEXCore_Base.a
+    #       ${FEXCORE_DIR}/build/FEXCore/Source/libJemallocLibs.a
+    #       ${FEXCORE_DIR}/build/External/cephes/libcephes_128bit.a
+    #       ${FEXCORE_DIR}/build/External/SoftFloat-3e/libsoftfloat_3e.a
+    #       xxHash::xxhash)  # fmt is already linked above
+endif()
+
 set(SHADER_RECOMPILER src/shader_recompiler/profile.h
                       src/shader_recompiler/recompiler.cpp
                       src/shader_recompiler/recompiler.h
@@ -1241,6 +1288,17 @@ target_link_libraries(shadps4 PRIVATE spdlog::spdlog)
 target_link_libraries(shadps4 PRIVATE magic_enum::magic_enum fmt::fmt toml11::toml11 tsl::robin_map xbyak::xbyak Tracy::TracyClient RenderDoc::API FFmpeg::ffmpeg Dear_ImGui ImGuiFileDialog gcn half::half ZLIB::ZLIB PNG::PNG minimp3)
 target_link_libraries(shadps4 PRIVATE Boost::headers GPUOpen::VulkanMemoryAllocator LibAtrac9 sirit Vulkan::Headers xxHash::xxhash Zydis::Zydis glslang::glslang SDL3::SDL3 pugixml::pugixml)
 target_link_libraries(shadps4 PRIVATE stb::headers lfreist-hwinfo::hwinfo nlohmann_json::nlohmann_json miniz::miniz fdk-aac CLI11::CLI11 OpenAL::OpenAL Cpp_Httplib miniupnpc::miniupnpc)
+
+if (ARCHITECTURE STREQUAL "arm64" AND ENABLE_FEX_CPU)
+    # Native ARM64 CPU backend: link the (macOS-ported) FEXCore static libs.
+    # Verified to compile+link fex_backend.cpp against these on Apple Silicon.
+    target_link_libraries(shadps4 PRIVATE
+        ${FEXCORE_DIR}/build/FEXCore/Source/libFEXCore.a
+        ${FEXCORE_DIR}/build/FEXCore/Source/libFEXCore_Base.a
+        ${FEXCORE_DIR}/build/FEXCore/Source/libJemallocLibs.a
+        ${FEXCORE_DIR}/build/External/cephes/libcephes_128bit.a
+        ${FEXCORE_DIR}/build/External/SoftFloat-3e/libsoftfloat_3e.a)
+endif()
 target_link_libraries(shadps4 PRIVATE Freetype::Freetype)
 target_link_libraries(shadps4 PRIVATE libprotobuf)
 target_include_directories(shadps4 PRIVATE "${SHADNET_PROTO_OUT}")

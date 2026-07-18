@@ -5,6 +5,9 @@
 #include "core/libraries/kernel/posix_error.h"
 #include "core/libraries/kernel/threads/pthread.h"
 #include "core/libraries/libs.h"
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+#include "core/cpu/fex_backend.h"
+#endif
 
 namespace Libraries::Kernel {
 
@@ -83,9 +86,19 @@ void _thread_cleanupspecific() {
                 /*
                  * Don't hold the lock while calling the
                  * destructor:
-                 */
+                */
                 lk.unlock();
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+                auto& fex = Core::CPU::FexBackend::Instance();
+                const VAddr dtor_addr = reinterpret_cast<VAddr>(destructor);
+                if (fex.IsGuestAddress(dtor_addr)) {
+                    fex.CallGuestCallback(dtor_addr, reinterpret_cast<u64>(data));
+                } else {
+                    destructor(data);
+                }
+#else
                 destructor(data);
+#endif
                 lk.lock();
             }
         }

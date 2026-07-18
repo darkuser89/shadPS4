@@ -299,6 +299,15 @@ int PS4_SYSV_ABI sceNpTrophyGetGameIcon(OrbisNpTrophyContext context, OrbisNpTro
                                         void* buffer, u64* size) {
     ASSERT(size != nullptr);
 
+    static constexpr std::array<u8, 68> EmptyTrophyIcon{
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x04, 0x00, 0x00, 0x00, 0xb5, 0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00,
+        0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64, 0xf8, 0x0f, 0x00,
+        0x01, 0x05, 0x01, 0x01, 0x27, 0x18, 0xe3, 0x66, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    };
+
     Common::SlotId contextId;
     contextId.index = context - 1;
     if (contextId.index >= trophy_contexts.size()) {
@@ -312,8 +321,20 @@ int PS4_SYSV_ABI sceNpTrophyGetGameIcon(OrbisNpTrophyContext context, OrbisNpTro
 
     Common::FS::IOFile icon(icon_file, Common::FS::FileAccessMode::Read);
     if (!icon.IsOpen()) {
-        LOG_ERROR(Lib_NpTrophy, "Failed to open trophy icon file: {}", icon_file.string());
-        return ORBIS_NP_TROPHY_ERROR_ICON_FILE_NOT_FOUND;
+        LOG_WARNING(Lib_NpTrophy,
+                    "Trophy icon is unavailable, returning an empty placeholder: {}",
+                    icon_file.string());
+        if (!buffer) {
+            *size = EmptyTrophyIcon.size();
+            return ORBIS_OK;
+        }
+        if (*size < EmptyTrophyIcon.size()) {
+            *size = EmptyTrophyIcon.size();
+            return ORBIS_NP_TROPHY_ERROR_INSUFFICIENT_BUFFER;
+        }
+        std::memcpy(buffer, EmptyTrophyIcon.data(), EmptyTrophyIcon.size());
+        *size = EmptyTrophyIcon.size();
+        return ORBIS_OK;
     }
     u64 icon_size = icon.GetSize();
 
@@ -349,6 +370,13 @@ int PS4_SYSV_ABI sceNpTrophyGetGameInfo(OrbisNpTrophyContext context, OrbisNpTro
 
     if (details->size != 0x4A0 || data->size != 0x20)
         return ORBIS_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+
+    const size_t details_size = details->size;
+    const size_t data_size = data->size;
+    std::memset(details, 0, sizeof(*details));
+    std::memset(data, 0, sizeof(*data));
+    details->size = details_size;
+    data->size = data_size;
 
     Common::SlotId contextId;
     contextId.index = context - 1;

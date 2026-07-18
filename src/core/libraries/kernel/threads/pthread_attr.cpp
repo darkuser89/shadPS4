@@ -6,6 +6,9 @@
 #include "core/libraries/kernel/threads/pthread.h"
 #include "core/libraries/kernel/threads/thread_state.h"
 #include "core/libraries/libs.h"
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+#include "core/cpu/fex_backend.h"
+#endif
 
 namespace Libraries::Kernel {
 
@@ -260,6 +263,17 @@ int PS4_SYSV_ABI posix_pthread_attr_get_np(PthreadT pthread, PthreadAttrT* dstat
         attr.flags |= PthreadAttrFlags::Detached;
     }
     pthread->lock.unlock();
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+    if (pthread == g_curthread) {
+        VAddr guest_stack_base;
+        u64 guest_stack_size;
+        if (Core::CPU::FexBackend::Instance().GetCurrentGuestStackBounds(guest_stack_base,
+                                                                         guest_stack_size)) {
+            attr.stackaddr_attr = reinterpret_cast<void*>(guest_stack_base);
+            attr.stacksize_attr = guest_stack_size;
+        }
+    }
+#endif
     memcpy(dst, &attr, sizeof(PthreadAttr));
     return ret;
 }

@@ -216,7 +216,9 @@ int PS4_SYSV_ABI sceAjmDecMp3ParseFrame(const u8* stream, u32 stream_size, int p
 int PS4_SYSV_ABI sceAjmFinalize();
 int PS4_SYSV_ABI sceAjmInitialize(s64 reserved, u32* out_context);
 AjmCodecType PS4_SYSV_ABI sceAjmInstanceCodecType(u32 instance_id);
-int PS4_SYSV_ABI sceAjmInstanceCreate(u32 context, AjmCodecType codec_type, AjmInstanceFlags flags,
+// AjmInstanceFlags is an eight-byte INTEGER-class argument in the PS4 SysV ABI. Keep the HLE
+// boundary scalar so native and translated callers marshal it identically on every host ABI.
+int PS4_SYSV_ABI sceAjmInstanceCreate(u32 context, AjmCodecType codec_type, u64 flags,
                                       u32* instance);
 int PS4_SYSV_ABI sceAjmInstanceDestroy(u32 context, u32 instance);
 int PS4_SYSV_ABI sceAjmInstanceExtend();

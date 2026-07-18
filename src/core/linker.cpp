@@ -11,7 +11,12 @@
 #include "common/string_util.h"
 #include "common/thread.h"
 #include "core/aerolib/aerolib.h"
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+#include "core/cpu/fex_backend.h"
+#include "core/cpu/fex_hle.h"
+#endif
 #include "core/aerolib/stubs.h"
+#include "core/cpu/guest_callback.h"
 #include "core/devtools/widget/module_list.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/kernel.h"
@@ -26,6 +31,11 @@
 
 #ifndef _WIN32
 #include <signal.h>
+#endif
+
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+#include <limits>
+#include <unordered_map>
 #endif
 
 namespace Core {
@@ -55,6 +65,16 @@ static PS4_SYSV_ABI void* RunMainEntry [[noreturn]] (EntryParams* params) {
                  : "r"(params->entry_addr), "r"(params), "r"(ProgramExitFunc)
                  : "rax", "rsi", "rdi");
     UNREACHABLE();
+#elif defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+    // Native ARM64: the guest x86-64 code cannot run directly. Route it through
+    // the FEXCore JIT (x86-64 -> ARM64) instead of Rosetta 2. See core/cpu/fex_backend.
+    auto& fex = Core::CPU::FexBackend::Instance();
+    if (!fex.Initialize()) {
+        UNREACHABLE_MSG("Failed to initialize FEXCore CPU backend");
+    }
+    const VAddr exit_thunk = Core::CPU::EmitHleStub(&Core::CPU::HleThunkT<ProgramExitFunc>::thunk);
+    fex.RunMainThread(params->entry_addr, params, reinterpret_cast<void*>(exit_thunk));
+    UNREACHABLE();
 #else
     UNREACHABLE_MSG("RunMainEntry unimplemented for current architecture.");
 #endif
@@ -63,6 +83,121 @@ static PS4_SYSV_ABI void* RunMainEntry [[noreturn]] (EntryParams* params) {
 Linker::Linker() : memory{Memory::Instance()} {}
 
 Linker::~Linker() = default;
+
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+// Some retail PRXs contain prebound 16-byte PLT slots (E9 rel32; NOP) mixed with the normal
+// indirect form (FF 25 rel32). The prebound displacement targets the PS4 process layout and can
+// point outside shadPS4's guest address space. The matching JUMP_SLOT relocation still gives us a
+// correctly resolved GOT entry, so recover the PLT table from those relocations and restore every
+// prebound slot to an indirect jump through its GOT entry.
+static void NormalizeFexPlt(Module* module) {
+    if (module->fex_plt_normalized) {
+        return;
+    }
+    module->fex_plt_normalized = true;
+
+    constexpr size_t PltEntrySize = 16;
+    auto& dynamic = module->dynamic_info;
+    const size_t relocation_count = dynamic.jmp_relocation_table_size / sizeof(elf_relocation);
+    if (relocation_count == 0) {
+        return;
+    }
+
+    const VAddr base = module->GetBaseAddress();
+    std::unordered_map<VAddr, size_t> got_to_index;
+    got_to_index.reserve(relocation_count);
+    for (size_t i = 0; i < relocation_count; ++i) {
+        got_to_index.emplace(base + dynamic.jmp_relocation_table[i].rel_offset, i);
+    }
+
+    const auto module_info = module->GetModuleInfo();
+    for (u32 segment_index = 0; segment_index < module_info.num_segments; ++segment_index) {
+        const auto& segment = module_info.segments[segment_index];
+        if ((segment.prot & PF_EXEC) == 0 || segment.size < PltEntrySize) {
+            continue;
+        }
+
+        const VAddr segment_begin = segment.address;
+        const VAddr segment_end = segment.address + segment.size;
+        for (VAddr address = segment_begin; address + 6 <= segment_end; ++address) {
+            const auto* entry = reinterpret_cast<const u8*>(address);
+            if (entry[0] != 0xFF || entry[1] != 0x25) {
+                continue;
+            }
+
+            s32 displacement{};
+            std::memcpy(&displacement, entry + 2, sizeof(displacement));
+            const VAddr got_address =
+                static_cast<VAddr>(static_cast<s64>(address + 6) + static_cast<s64>(displacement));
+            const auto index_it = got_to_index.find(got_address);
+            if (index_it == got_to_index.end()) {
+                continue;
+            }
+
+            const size_t known_index = index_it->second;
+            if (address < segment_begin + known_index * PltEntrySize) {
+                continue;
+            }
+            const VAddr table_begin = address - known_index * PltEntrySize;
+            if (table_begin < segment_begin ||
+                relocation_count > (segment_end - table_begin) / PltEntrySize) {
+                continue;
+            }
+
+            bool valid_table = true;
+            for (size_t i = 0; i < relocation_count; ++i) {
+                const auto* slot = reinterpret_cast<const u8*>(table_begin + i * PltEntrySize);
+                const VAddr expected_got = base + dynamic.jmp_relocation_table[i].rel_offset;
+                if (slot[0] == 0xFF && slot[1] == 0x25) {
+                    s32 slot_displacement{};
+                    std::memcpy(&slot_displacement, slot + 2, sizeof(slot_displacement));
+                    const VAddr slot_got =
+                        static_cast<VAddr>(static_cast<s64>(reinterpret_cast<VAddr>(slot + 6)) +
+                                           static_cast<s64>(slot_displacement));
+                    valid_table = slot_got == expected_got;
+                } else {
+                    valid_table = slot[0] == 0xE9 && slot[5] == 0x90;
+                }
+                if (!valid_table) {
+                    break;
+                }
+            }
+            if (!valid_table) {
+                continue;
+            }
+
+            size_t restored = 0;
+            for (size_t i = 0; i < relocation_count; ++i) {
+                auto* slot = reinterpret_cast<u8*>(table_begin + i * PltEntrySize);
+                if (slot[0] != 0xE9 || slot[5] != 0x90) {
+                    continue;
+                }
+                const VAddr expected_got = base + dynamic.jmp_relocation_table[i].rel_offset;
+                const s64 new_displacement = static_cast<s64>(expected_got) -
+                                             static_cast<s64>(reinterpret_cast<VAddr>(slot + 6));
+                if (new_displacement < std::numeric_limits<s32>::min() ||
+                    new_displacement > std::numeric_limits<s32>::max()) {
+                    LOG_ERROR(Core_Linker,
+                              "FEX PLT normalization failed for {} entry {}: GOT is out of range",
+                              module->name, i);
+                    continue;
+                }
+                const s32 rel32 = static_cast<s32>(new_displacement);
+                slot[0] = 0xFF;
+                slot[1] = 0x25;
+                std::memcpy(slot + 2, &rel32, sizeof(rel32));
+                ++restored;
+            }
+            if (restored != 0) {
+                LOG_INFO(Core_Linker,
+                         "FEX normalized {} prebound PLT entries in {} through their GOT slots",
+                         restored, module->name);
+            }
+            return;
+        }
+    }
+}
+#endif
 
 void Linker::Execute(const std::vector<std::string>& args) {
     if (EmulatorSettings.IsDebugDump()) {
@@ -92,7 +227,7 @@ void Linker::Execute(const std::vector<std::string>& args) {
     // If we're running LLE libSceLibcInternal,
     // we need to find the _malloc_init function and run it manually.
     // This is something libkernel runs during initialization.
-    static PS4_SYSV_ABI s32 (*malloc_init)() = nullptr;
+    static VAddr malloc_init = 0;
 
     if (has_libcinternal) {
         for (const auto& m : m_modules) {
@@ -103,7 +238,7 @@ void Linker::Execute(const std::vector<std::string>& args) {
                 // and for all the memory allocating functions, so we can initialize our heap API
                 for (const auto& sym : mod->export_sym.GetSymbols()) {
                     if (sym.nid_name.compare("_malloc_init") == 0) {
-                        malloc_init = reinterpret_cast<PS4_SYSV_ABI s32 (*)()>(sym.virtual_address);
+                        malloc_init = sym.virtual_address;
                     }
                 }
             }
@@ -162,9 +297,14 @@ void Linker::Execute(const std::vector<std::string>& args) {
         if (has_libcinternal) {
             LoadLibcInternal();
 
-            if (malloc_init != nullptr) {
+            if (malloc_init != 0) {
                 // Call _malloc_init
-                s32 ret = malloc_init();
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+                s32 ret = static_cast<s32>(
+                    Core::CPU::FexBackend::Instance().CallGuestFunction(malloc_init, 0, 0, 0));
+#else
+                s32 ret = reinterpret_cast<PS4_SYSV_ABI s32 (*)()>(malloc_init)();
+#endif
                 ASSERT_MSG(ret == 0, "malloc_init failed");
             }
         }
@@ -370,6 +510,9 @@ void Linker::Relocate(Module* module) {
             LOG_INFO(Core_Linker, "Function not patched! {}", rel_name);
         }
     });
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+    NormalizeFexPlt(module);
+#endif
 }
 
 bool Linker::Resolve(const std::string& name, Loader::SymbolType sym_type, Module* m,
@@ -459,12 +602,15 @@ void* Linker::TlsGetAddr(u64 module_index, u64 offset) {
     if (!addr) {
         // Module was just loaded by above code. Allocate TLS block for it.
         const u32 init_image_size = module->tls.init_image_size;
-        u8* dest{};
-        if (heap_api && heap_api->heap_malloc) {
-            dest = reinterpret_cast<u8*>(heap_api->heap_malloc(module->tls.image_size));
-        } else {
-            dest = reinterpret_cast<u8*>(std::malloc(module->tls.image_size));
-        }
+        // heap_api may not be registered yet the first time a module (e.g.
+        // libc.prx) triggers TLS allocation. Dereferencing heap_api->heap_malloc
+        // then faults at address 0x0. Guard it and fall back to host malloc, as
+        // upstream does (#4709).
+        // Host-allocate the TLS block. Routing this through the guest heap
+        // (heap_malloc via CPU::InvokeGuestOrHost) re-enters guest execution
+        // during early module init and faults with a control-flow-to-0 on this
+        // backend. Paired with the std::free in FreeTlsForNonPrimaryThread.
+        u8* dest = reinterpret_cast<u8*>(std::malloc(module->tls.image_size));
         const u8* src = reinterpret_cast<const u8*>(module->tls.image_virtual_addr);
         std::memcpy(dest, src, init_image_size);
         std::memset(dest + init_image_size, 0, module->tls.image_size - init_image_size);
@@ -495,21 +641,18 @@ void* Linker::AllocateTlsForThread(bool is_primary) {
             &addr_out, tls_aligned, 3, 0, "SceKernelPrimaryTcbTls");
         ASSERT_MSG(ret == 0, "Unable to allocate TLS+TCB for the primary thread");
     } else {
-        if (heap_api && heap_api->heap_malloc) {
-            addr_out = heap_api->heap_malloc(total_tls_size);
-        } else {
-            addr_out = std::malloc(total_tls_size);
-        }
+        // Host-allocate the secondary-thread TLS+TCB block. Calling the guest
+        // heap_malloc through FEX here re-enters guest execution during thread
+        // creation and faults with a control-flow-to-0. Must be paired with the
+        // std::free in FreeTlsForNonPrimaryThread.
+        addr_out = std::malloc(total_tls_size);
     }
     return addr_out;
 }
 
 void Linker::FreeTlsForNonPrimaryThread(void* pointer) {
-    if (heap_api && heap_api->heap_free) {
-        heap_api->heap_free(pointer);
-    } else {
-        std::free(pointer);
-    }
+    // Paired with the host allocation in AllocateTlsForThread / TlsGetAddr.
+    std::free(pointer);
 }
 
 void Linker::DebugDump() {

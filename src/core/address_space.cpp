@@ -45,6 +45,11 @@ constexpr VAddr USER_MIN = 0x1000000000ULL;
 #if defined(__linux__)
 // Linux maps the shadPS4 executable around here, so limit the user maximum
 constexpr VAddr USER_MAX = 0x54FFFFFFFFFFULL;
+#elif defined(__APPLE__) && defined(ARCH_ARM64)
+// Reserving the full 0x5f... guest range on Apple Silicon pushes later Metal/libmalloc
+// allocations above macOS xzone's segment-table limit. A 44-bit guest range is still far larger
+// than the address space used by PS4 applications and leaves a safe host allocation window.
+constexpr VAddr USER_MAX = 0xFFFFFFFFFFFULL;
 #elif defined(__FreeBSD__)
 // FreeBSD address space is extremely volatile, keep this lower for safety.
 constexpr VAddr USER_MAX = 0xFFFFFFFFFFFULL;

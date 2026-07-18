@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/serdes.h"
+#include "common/arch.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
@@ -13,7 +14,15 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 2u;
-static constexpr u32 ShaderMetaVersion = 2u;
+// SRT metadata embeds native walker machine code. Keep ARM64 and x86-64
+// metadata incompatible so switching between FEX-native and Rosetta builds can
+// never execute cached code for the other host ISA.
+static constexpr u32 ShaderMetaVersion =
+    2u
+#ifdef ARCH_ARM64
+    | 0x80000000u
+#endif
+    ;
 static constexpr u32 PipelineKeyVersion = 2u;
 } // namespace Serialization
 
@@ -277,11 +286,21 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     } else {
         const auto& it = std::ranges::find(it_pgm.value()->modules, spec, &Program::Module::spec);
         if (it != it_pgm.value()->modules.end()) {
-            // If the permutation is already preloaded, make sure it has the same permutation index
+            // The same specialization can be referenced by stale cache metadata with a different
+            // permutation index. The already loaded module is equivalent, so reuse it rather than
+            // aborting cache warmup or inserting the same specialization twice.
             const auto idx = std::distance(it_pgm.value()->modules.begin(), it);
-            ASSERT_MSG(perm_idx == idx, "Permutation {} is already inserted at {}! ({}_{:x})",
-                       perm_idx, idx, program->info.stage, program->info.pgm_hash);
+            if (perm_idx != idx) {
+                LOG_WARNING(Render,
+                            "Ignoring stale permutation index {} for {} shader {:#x}; already "
+                            "loaded at {}",
+                            perm_idx, program->info.stage, program->info.pgm_hash, idx);
+            }
             module = it->module;
+
+            infos[stage] = &it_pgm.value()->info;
+            modules[stage] = module;
+            return true;
         } else {
             module = CompileSPV(spv, instance.GetDevice());
         }

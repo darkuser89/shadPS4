@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <string_view>
+
 #include "common/types.h"
 #include "core/libraries/kernel/process.h"
 
@@ -14,6 +16,7 @@ bool isDebugModule(s32 id);
 bool validateModuleId(s32 id);
 s32 loadModuleInternal(s32 index, s32 argc, const void* argv, s32* res_out);
 s32 loadModule(s32 id, s32 argc, const void* argv, s32* res_out);
+bool loadImportedModule(std::string_view module_name);
 s32 unloadModule(s32 id, s32 argc, const void* argv, s32* res_out, bool is_internal);
 s32 preloadModulesForLibkernel();
 

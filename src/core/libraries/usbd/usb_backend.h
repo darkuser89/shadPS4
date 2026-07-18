@@ -9,6 +9,7 @@
 
 #include "common/assert.h"
 #include "common/types.h"
+#include "core/cpu/guest_callback.h"
 
 namespace Libraries::Usbd {
 
@@ -447,7 +448,7 @@ public:
             transfer->status = HandleAsyncTransfer(transfer);
             transfer->actual_length = transfer->length;
             if (transfer->callback) {
-                transfer->callback(transfer);
+                Core::CPU::InvokeGuestOrHost(transfer->callback, transfer);
             }
             if (flags & LIBUSB_TRANSFER_FREE_TRANSFER) {
                 libusb_free_transfer(transfer);

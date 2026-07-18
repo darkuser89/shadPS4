@@ -306,12 +306,14 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
     };
-    WarmUp();
-
     auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
                vk::to_string(cache_result));
     pipeline_cache = std::move(cache);
+
+    // Cached pipelines must use the real Vulkan cache too. Creating it after WarmUp made every
+    // preloaded KosmicKrisp pipeline repeat SPIR-V -> NIR -> MSL translation on each launch.
+    WarmUp();
 }
 
 PipelineCache::~PipelineCache() = default;

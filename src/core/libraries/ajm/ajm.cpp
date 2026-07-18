@@ -148,10 +148,11 @@ AjmCodecType PS4_SYSV_ABI sceAjmInstanceCodecType(u32 instance_id) {
     return static_cast<AjmCodecType>((instance_id >> 14) & 0x1F);
 }
 
-int PS4_SYSV_ABI sceAjmInstanceCreate(u32 context_id, AjmCodecType codec_type,
-                                      AjmInstanceFlags flags, u32* out_instance) {
-    LOG_INFO(Lib_Ajm, "called context = {}, codec_type = {}, flags = {:#x}", context_id,
-             magic_enum::enum_name(codec_type), flags.raw);
+int PS4_SYSV_ABI sceAjmInstanceCreate(u32 context_id, AjmCodecType codec_type, u64 flags_raw,
+                                      u32* out_instance) {
+    const AjmInstanceFlags flags{.raw = flags_raw};
+    LOG_TRACE(Lib_Ajm, "called context = {}, codec_type = {}, flags = {:#x}", context_id,
+              magic_enum::enum_name(codec_type), flags.raw);
 
     auto it = contexts.find(context_id);
     if (it == contexts.end()) {
@@ -162,7 +163,7 @@ int PS4_SYSV_ABI sceAjmInstanceCreate(u32 context_id, AjmCodecType codec_type,
 }
 
 int PS4_SYSV_ABI sceAjmInstanceDestroy(u32 context_id, u32 instance_id) {
-    LOG_INFO(Lib_Ajm, "called context = {}, instance = {}", context_id, instance_id);
+    LOG_TRACE(Lib_Ajm, "called context = {}, instance = {}", context_id, instance_id);
 
     auto it = contexts.find(context_id);
     if (it == contexts.end()) {

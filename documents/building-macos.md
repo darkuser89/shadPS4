@@ -58,3 +58,34 @@ Now run the emulator:
 ```
 ./shadps4 /"PATH"/"TO"/"GAME"/"FOLDER"/eboot.bin
 ```
+
+### Native ARM64 build with FEXCore (this fork, Apple Silicon)
+
+This fork can build shadPS4 as a native arm64 binary that executes the x86-64
+guest code through an embedded FEXCore JIT instead of running the whole
+emulator under Rosetta 2. It requires a macOS-ported, already-built FEX tree
+(see `FEX_ROADMAP.md` and `INTEGRATION.md` for status and internals).
+
+Configure with:
+```
+cmake -S . -B build-arm64/ \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DENABLE_QT_GUI=OFF -DENABLE_UPDATER=OFF \
+  -DENABLE_FEX_CPU=ON \
+  -DFEXCORE_DIR=/path/to/FEX_MacOs_FEX-2607
+cmake --build build-arm64 --target shadps4
+```
+
+`FEXCORE_DIR` must point at the root of the built FEX source+build tree.
+The host binary, FEXCore and native plugins are ARM64; `eboot.bin`, PRX and
+PS4 system modules remain x86-64 guest code.
+
+Runtime environment knobs (debugging/performance experiments only — the
+defaults are the correct configuration):
+
+- `FEX_MAXINST`, `FEX_MULTIBLOCK` — JIT block formation controls for
+  isolating translation regressions.
+- `FEX_VECTORTSO=0`, `FEX_MEMCPYSETTSO=0` — disable the TSO ordering of
+  vector/rep-string stores. Faster, but loses x86 memory-model correctness;
+  known to corrupt lock-free job queues (see INTEGRATION.md, 2026-07-18).

@@ -14,6 +14,7 @@
 
 #ifndef _WIN64
 #include <sys/mman.h>
+#include <unistd.h>
 #include "common/adaptive_mutex.h"
 #ifdef ENABLE_USERFAULTFD
 #include <thread>
@@ -204,17 +205,92 @@ struct PageManager::Impl {
         auto& impl = memory->GetAddressSpace();
         ASSERT_MSG(perms != Core::MemoryPermission::Write,
                    "Attempted to protect region as write-only which is not a valid permission");
+#ifdef __APPLE__
+        // The cache tracks PS4 memory in 4 KiB units, while Apple Silicon only
+        // accepts mprotect ranges starting on its 16 KiB host-page boundary.
+        // A host page must use the most restrictive permissions requested by
+        // any of the tracker pages it contains; otherwise unwatching one 4 KiB
+        // page could accidentally make a watched neighbour writable again.
+        const size_t host_page_size = static_cast<size_t>(getpagesize());
+        ASSERT(host_page_size >= PM_PAGE_SIZE && host_page_size % PM_PAGE_SIZE == 0);
+        ASSERT((PAGES_PER_LOCK * PM_PAGE_SIZE) % host_page_size == 0);
+
+        const VAddr host_begin = Common::AlignDown(address, host_page_size);
+        const VAddr host_end = Common::AlignUp(address + size, host_page_size);
+        VAddr protected_until = host_begin;
+        rasterizer->ForEachMappedRangeInRange(
+            host_begin, host_end - host_begin, [&](const auto& mapped_range) {
+                // Watcher requests may span holes in the GPU mapping. mprotect returns ENOMEM when
+                // any part of its range is not mapped, so only touch host pages intersecting a
+                // current GPU mapping. Aligning two adjacent mapped ranges can select the same host
+                // page; protected_until keeps that page from being processed twice.
+                const VAddr mapped_host_begin = std::max(
+                    Common::AlignDown(mapped_range.lower(), host_page_size), protected_until);
+                const VAddr mapped_host_end =
+                    std::min(Common::AlignUp(mapped_range.upper(), host_page_size), host_end);
+                for (VAddr host_address = mapped_host_begin; host_address < mapped_host_end;
+                     host_address += host_page_size) {
+                    Core::MemoryPermission host_perms = Core::MemoryPermission::ReadWrite;
+                    const size_t first_page = host_address >> PM_PAGE_BITS;
+                    const size_t page_count = host_page_size / PM_PAGE_SIZE;
+                    for (size_t page = first_page; page < first_page + page_count; ++page) {
+                        host_perms &= cached_pages[page].Perms();
+                    }
+                    // POSIX cannot reliably express write-only memory. A read watcher
+                    // therefore has to fault both reads and writes for the host page.
+                    if (host_perms == Core::MemoryPermission::Write) {
+                        host_perms = Core::MemoryPermission::None;
+                    }
+                    impl.Protect(host_address, host_page_size, host_perms);
+                    protected_until = host_address + host_page_size;
+                }
+            });
+#else
         impl.Protect(address, size, perms);
+#endif
     }
 
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
+        // An unaligned atomic emitted by FEX is a real ARM64 alignment fault, not an
+        // mprotect page-watcher fault. Let the FEX backend emulate the x86 operation.
+        if (Common::IsAlignmentError(context)) {
+            return false;
+        }
+
         const auto addr = reinterpret_cast<VAddr>(fault_address);
+#ifdef __APPLE__
+        // mprotect has 16 KiB granularity on Apple Silicon. A fault can
+        // therefore come from any 4 KiB tracker page sharing the protected
+        // host page. Process the whole host page so the retried access cannot
+        // immediately fault again on a watched neighbour.
+        const size_t host_page_size = static_cast<size_t>(getpagesize());
+        const VAddr fault_begin = Common::AlignDown(addr, host_page_size);
+        boost::container::small_vector<std::pair<VAddr, u64>, 4> mapped_ranges;
+        rasterizer->ForEachMappedRangeInRange(fault_begin, host_page_size, [&](const auto& range) {
+            mapped_ranges.emplace_back(range.lower(), range.upper() - range.lower());
+        });
+
+        bool handled = false;
+        const bool is_write = Common::IsWriteError(context);
+        for (const auto& [range_begin, range_size] : mapped_ranges) {
+            if (is_write) {
+                // A pure read watcher is represented as PROT_NONE on POSIX.
+                // Resolve it before invalidating write watchers, otherwise the
+                // retried store faults forever on the still-active read watch.
+                handled |= rasterizer->ReadMemory(range_begin, range_size);
+                handled |= rasterizer->InvalidateMemory(range_begin, range_size);
+            } else {
+                handled |= rasterizer->ReadMemory(range_begin, range_size);
+            }
+        }
+        return handled;
+#else
         if (Common::IsWriteError(context)) {
             return rasterizer->InvalidateMemory(addr, 8);
         } else {
             return rasterizer->ReadMemory(addr, 8);
         }
-        return false;
+#endif
     }
 #endif
 

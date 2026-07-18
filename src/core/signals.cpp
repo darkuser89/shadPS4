@@ -8,6 +8,9 @@
 #include "core/libraries/kernel/threads/exception.h"
 #include "core/signals.h"
 #include "emulator.h"
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+#include "core/cpu/fex_hle.h"
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -113,6 +116,12 @@ void SignalHandler(int sig, siginfo_t* info, void* raw_context) {
                                                     reinterpret_cast<ucontext_t*>(raw_context));
                 return;
             }
+#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+            if (Core::CPU::g_current_fex_hle_signature != nullptr) {
+                LOG_CRITICAL(Core_Linker, "Native fault while handling FEX HLE import: {}",
+                             Core::CPU::g_current_fex_hle_signature);
+            }
+#endif
             UNREACHABLE_MSG("Unhandled access violation at code address {}: {} address {}",
                             fmt::ptr(code_address), is_write ? "Write to" : "Read from",
                             fmt::ptr(info->si_addr));

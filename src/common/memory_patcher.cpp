@@ -230,13 +230,53 @@ void OnGameLoaded() {
             if (!repo.is_directory()) {
                 continue;
             }
-            std::ifstream json_file{repo.path() / "files.json"};
-            nlohmann::json available_patches = nlohmann::json::parse(json_file);
             std::filesystem::path game_patch_file;
-            for (auto const& [filename, serials] : available_patches.items()) {
-                if (std::find(serials.begin(), serials.end(), g_game_serial) != serials.end()) {
-                    game_patch_file = repo.path() / filename;
-                    break;
+
+            const auto index_path = repo.path() / "files.json";
+            if (std::filesystem::exists(index_path)) {
+                try {
+                    std::ifstream json_file{index_path};
+                    const nlohmann::json available_patches = nlohmann::json::parse(json_file);
+                    for (auto const& [filename, serials] : available_patches.items()) {
+                        if (std::find(serials.begin(), serials.end(), g_game_serial) !=
+                            serials.end()) {
+                            game_patch_file = repo.path() / filename;
+                            break;
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    LOG_WARNING(Loader, "Failed to read patch index {}: {}", index_path.string(),
+                                e.what());
+                }
+            }
+
+            // Older patch downloads do not contain files.json. Prefer the common
+            // <title-id>.xml layout, then inspect the small set of repository XML files.
+            if (game_patch_file.empty()) {
+                const auto serial_path = repo.path() / (g_game_serial + ".xml");
+                if (std::filesystem::exists(serial_path)) {
+                    game_patch_file = serial_path;
+                } else {
+                    for (const auto& entry : std::filesystem::directory_iterator(repo.path())) {
+                        if (!entry.is_regular_file() || entry.path().extension() != ".xml") {
+                            continue;
+                        }
+
+                        pugi::xml_document doc;
+                        if (!doc.load_file(entry.path().c_str())) {
+                            continue;
+                        }
+                        const auto title_ids = doc.child("Patch").child("TitleID");
+                        for (const auto& id : title_ids.children("ID")) {
+                            if (id.child_value() == g_game_serial) {
+                                game_patch_file = entry.path();
+                                break;
+                            }
+                        }
+                        if (!game_patch_file.empty()) {
+                            break;
+                        }
+                    }
                 }
             }
             if (std::filesystem::exists(game_patch_file)) {

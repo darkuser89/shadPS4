@@ -10,6 +10,7 @@
 #include "core/libraries/avplayer/avplayer_source.h"
 #include "core/memory.h"
 
+#include <limits>
 #include <magic_enum/magic_enum.hpp>
 
 extern "C" {
@@ -24,6 +25,8 @@ extern "C" {
 #include "common/support/avdec.h"
 
 namespace Libraries::AvPlayer {
+
+static constexpr u32 VideoBufferReuseDelay = 3;
 
 AvPlayerSource::AvPlayerSource(AvPlayerStateCallback& state, bool use_vdec2)
     : m_state(state), m_use_vdec2(use_vdec2) {}
@@ -100,6 +103,14 @@ static u64 TimestampToMillis(s64 timestamp, AVRational time_base) {
 
     const auto millis = av_rescale_q(timestamp, time_base, AVRational{1, 1000});
     return millis > 0 ? u64(millis) : 0;
+}
+
+static s64 MillisToTimestamp(u64 millis, AVRational time_base) {
+    if (time_base.num <= 0 || time_base.den <= 0) {
+        return 0;
+    }
+    const auto clamped = std::min(millis, u64(std::numeric_limits<s64>::max()));
+    return av_rescale_q(s64(clamped), AVRational{1, 1000}, time_base);
 }
 
 static u64 StreamDurationMillis(const AVFormatContext& context, const AVStream& stream) {
@@ -218,10 +229,23 @@ bool AvPlayerSource::Start() {
         LOG_ERROR(Lib_AvPlayer, "Could not start playback. No streams.");
         return false;
     }
+
+    const auto seek_stream_index = m_video_stream_index.has_value() ? m_video_stream_index.value()
+                                                                    : m_audio_stream_index.value();
+    const auto seek_stream = m_avformat_context->streams[seek_stream_index];
+    const auto seek_timestamp = MillisToTimestamp(m_seek_time_msec, seek_stream->time_base);
+    const auto seek_result = avformat_seek_file(m_avformat_context.get(), seek_stream_index,
+                                                std::numeric_limits<s64>::min(), seek_timestamp,
+                                                seek_timestamp, AVSEEK_FLAG_BACKWARD);
+    if (seek_result < 0) {
+        LOG_ERROR(Lib_AvPlayer, "Could not seek source to {} ms: {}", m_seek_time_msec,
+                  av_err2str(seek_result));
+        return false;
+    }
+    avformat_flush(m_avformat_context.get());
+
     if (m_video_stream_index) {
         const auto stream = m_avformat_context->streams[m_video_stream_index.value()];
-        avformat_seek_file(m_avformat_context.get(), m_video_stream_index.value(), 0, 0,
-                           stream->duration, 0);
         const auto decoder = avcodec_find_decoder(stream->codecpar->codec_id);
         if (decoder == nullptr) {
             return false;
@@ -245,14 +269,13 @@ bool AvPlayerSource::Start() {
             height = Common::AlignUp(height, 16);
         }
         const auto size = (width * height * 3) / 2;
-        for (u64 index = 0; index < m_max_num_video_framebuffers; ++index) {
+        for (u64 index = 0; index < m_max_num_video_framebuffers + VideoBufferReuseDelay;
+             ++index) {
             m_video_buffers.Push(GuestBuffer(m_memory_replacement, 0x100, size, true));
         }
     }
     if (m_audio_stream_index) {
         const auto stream = m_avformat_context->streams[m_audio_stream_index.value()];
-        avformat_seek_file(m_avformat_context.get(), m_audio_stream_index.value(), 0, 0,
-                           stream->duration, 0);
         const auto decoder = avcodec_find_decoder(stream->codecpar->codec_id);
         if (decoder == nullptr) {
             return false;
@@ -279,7 +302,8 @@ bool AvPlayerSource::Start() {
     m_demuxer_thread.Run([this](std::stop_token stop) { this->DemuxerThread(stop); });
     m_video_decoder_thread.Run([this](std::stop_token stop) { this->VideoDecoderThread(stop); });
     m_audio_decoder_thread.Run([this](std::stop_token stop) { this->AudioDecoderThread(stop); });
-    m_start_time = std::chrono::high_resolution_clock::now();
+    m_start_time =
+        std::chrono::high_resolution_clock::now() - std::chrono::milliseconds(m_seek_time_msec);
     return true;
 }
 
@@ -295,12 +319,24 @@ bool AvPlayerSource::Stop() {
         m_up_data_streamer->Reset();
     }
 
+    // Publish every stop request before joining any worker. The demuxer may be producing packets
+    // while a decoder is waiting for a guest buffer, so sequential stop-and-join can deadlock.
+    m_demuxer_thread.RequestStop();
+    m_video_decoder_thread.RequestStop();
+    m_audio_decoder_thread.RequestStop();
+
+    m_video_packets_cv.Notify();
+    m_audio_packets_cv.Notify();
+    m_video_buffers_cv.Notify();
+    m_audio_buffers_cv.Notify();
+
+    m_demuxer_thread.Stop();
     m_video_decoder_thread.Stop();
     m_audio_decoder_thread.Stop();
-    m_demuxer_thread.Stop();
 
     m_current_audio_frame.reset();
     m_current_video_frame.reset();
+    m_retired_video_frames.clear();
 
     m_video_buffers.Clear();
     m_audio_buffers.Clear();
@@ -317,6 +353,36 @@ bool AvPlayerSource::Stop() {
     m_is_paused = false;
     m_is_eof = false;
 
+    return true;
+}
+
+bool AvPlayerSource::JumpToTime(u64 time_msec) {
+    if (m_avformat_context == nullptr || (!m_video_stream_index && !m_audio_stream_index)) {
+        LOG_ERROR(Lib_AvPlayer, "Could not jump to {} ms. No active source streams.", time_msec);
+        return false;
+    }
+
+    const auto duration = DurationMillis();
+    if (duration != 0) {
+        time_msec = std::min(time_msec, duration);
+    }
+
+    const bool was_paused = m_is_paused.load();
+    if (!Stop()) {
+        LOG_ERROR(Lib_AvPlayer, "Could not stop source before jumping to {} ms.", time_msec);
+        return false;
+    }
+
+    m_seek_time_msec = time_msec;
+    if (!Start()) {
+        LOG_ERROR(Lib_AvPlayer, "Could not restart source after jumping to {} ms.", time_msec);
+        return false;
+    }
+    if (was_paused) {
+        Pause();
+    }
+
+    LOG_INFO(Lib_AvPlayer, "Jumped playback to {} ms", time_msec);
     return true;
 }
 
@@ -345,12 +411,6 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfo& video_info) {
 }
 
 bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
-    if (m_current_video_frame.has_value()) {
-        m_video_buffers.Push(std::move(m_current_video_frame->buffer));
-        m_current_video_frame.reset();
-        m_video_buffers_cv.Notify();
-    }
-
     if (!IsActive() || m_is_paused) {
         return false;
     }
@@ -373,6 +433,16 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
                 return false;
             }
         }
+    }
+
+    if (m_current_video_frame.has_value()) {
+        m_retired_video_frames.push_back(std::move(*m_current_video_frame));
+        m_current_video_frame.reset();
+    }
+    if (m_retired_video_frames.size() > VideoBufferReuseDelay) {
+        m_video_buffers.Push(std::move(m_retired_video_frames.front().buffer));
+        m_retired_video_frames.pop_front();
+        m_video_buffers_cv.Notify();
     }
 
     auto frame = m_video_frames.Pop();
@@ -577,12 +647,11 @@ void AvPlayerSource::DemuxerThread(std::stop_token stop) {
     m_video_buffers_cv.Notify();
     m_audio_buffers_cv.Notify();
 
-    m_video_decoder_thread.Join();
-    m_audio_decoder_thread.Join();
-    m_state.OnEOF();
+    if (!stop.stop_requested()) {
+        m_state.OnEOF();
+    }
 
     LOG_INFO(Lib_AvPlayer, "Demuxer Thread exited normally");
-    m_demuxer_thread.Join();
 }
 
 AvPlayerSource::AVFramePtr AvPlayerSource::ConvertVideoFrame(const AVFrame& frame) {
@@ -666,19 +735,18 @@ Frame AvPlayerSource::PrepareVideoFrame(GuestBuffer buffer, const AVFrame& frame
     ASSERT(frame.format == AV_PIX_FMT_NV12);
 
     auto p_buffer = buffer.GetBuffer();
-    CopyNV12Data(p_buffer, frame, m_use_vdec2);
-
-    const auto stream = m_avformat_context->streams[m_video_stream_index.value()];
-    const auto timestamp = FrameTimestampMillis(frame, stream->time_base);
-
     auto width = u32(frame.width);
     auto height = u32(frame.height);
     if (!m_use_vdec2) {
         width = Common::AlignUp(width, 16);
         height = Common::AlignUp(height, 16);
     }
+    CopyNV12Data(p_buffer, frame, m_use_vdec2);
     Core::Memory::Instance()->InvalidateMemory(reinterpret_cast<VAddr>(p_buffer),
                                                (width * height * 3) / 2);
+
+    const auto stream = m_avformat_context->streams[m_video_stream_index.value()];
+    const auto timestamp = FrameTimestampMillis(frame, stream->time_base);
 
     return Frame{
         .buffer = std::move(buffer),
@@ -769,7 +837,6 @@ void AvPlayerSource::VideoDecoderThread(std::stop_token stop) {
     }
 
     LOG_INFO(Lib_AvPlayer, "Video Decoder Thread exited normally");
-    m_video_decoder_thread.Join();
 }
 
 AvPlayerSource::AVFramePtr AvPlayerSource::ConvertAudioFrame(const AVFrame& frame) {
@@ -887,7 +954,6 @@ void AvPlayerSource::AudioDecoderThread(std::stop_token stop) {
     }
 
     LOG_INFO(Lib_AvPlayer, "Audio Decoder Thread exited normally");
-    m_audio_decoder_thread.Join();
 }
 
 bool AvPlayerSource::HasRunningThreads() const {

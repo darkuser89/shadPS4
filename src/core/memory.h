@@ -194,7 +194,9 @@ public:
     bool IsValidGpuMapping(VAddr virtual_addr, u64 size) {
         // The PS4's GPU can only handle 40 bit addresses.
         const VAddr max_gpu_address{0x10000000000};
-        return virtual_addr + size < max_gpu_address;
+        // Subtract instead of adding so a garbage size cannot wrap around and
+        // accidentally pass the address-width check.
+        return virtual_addr < max_gpu_address && size <= max_gpu_address - virtual_addr;
     }
 
     bool IsValidMapping(const VAddr virtual_addr, const u64 size = 0) {
@@ -290,6 +292,11 @@ public:
 
     void InvalidateMemory(VAddr addr, u64 size) const;
 
+    // Maps a canonical PS4 fixed address (e.g. 0x1000000000 pool bases) onto the
+    // relocated ARM64 guest space; identity on other hosts / in-range addresses.
+    // Public because the FEX fault handler emulates carveout accesses through it.
+    VAddr TranslateCanonicalGuestAddress(VAddr virtual_addr);
+
 private:
     VMAHandle FindVMA(VAddr target) {
         return std::prev(vma_map.upper_bound(target));
@@ -310,6 +317,8 @@ private:
 
     VMAHandle CreateArea(VAddr virtual_addr, u64 size, MemoryProt prot, MemoryMapFlags flags,
                          VMAType type, std::string_view name, u64 alignment);
+
+    VAddr RelocateFixedGuestAddress(VAddr virtual_addr, u64 size);
 
     VAddr SearchFree(VAddr virtual_addr, u64 size, u32 alignment);
 
