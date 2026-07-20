@@ -22,11 +22,20 @@ namespace VideoCore {
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
 
-static bool NeedsStorageUsage(TextureCache::BindingType binding) {
-    // Render targets may be cleared or otherwise manipulated through compute. Other sampled-only
-    // images stay free of eStorage until the guest actually binds them for shader writes.
-    return binding == TextureCache::BindingType::Storage ||
-           binding == TextureCache::BindingType::RenderTarget;
+static vk::ImageUsageFlags RequiredImageUsage(TextureCache::BindingType binding) {
+    switch (binding) {
+    case TextureCache::BindingType::Texture:
+    case TextureCache::BindingType::VideoOut:
+        return vk::ImageUsageFlagBits::eSampled;
+    case TextureCache::BindingType::Storage:
+        return vk::ImageUsageFlagBits::eStorage;
+    case TextureCache::BindingType::RenderTarget:
+        // Render targets may also be cleared or otherwise manipulated through compute.
+        return vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eStorage;
+    case TextureCache::BindingType::DepthTarget:
+        return vk::ImageUsageFlagBits::eDepthStencilAttachment;
+    }
+    UNREACHABLE();
 }
 
 static u64 HashSampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sampler,
@@ -258,11 +267,9 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
     if (recreate) {
         auto new_info = requested_info;
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
-        const bool enable_storage =
-            NeedsStorageUsage(binding) ||
-            bool(cache_image.usage_flags & vk::ImageUsageFlagBits::eStorage);
+        const auto requested_usage = cache_image.usage_flags | RequiredImageUsage(binding);
         const auto new_image_id = slot_images.insert(instance, scheduler, blit_helper,
-                                                     slot_image_views, new_info, enable_storage);
+                                                     slot_image_views, new_info, requested_usage);
         RegisterImage(new_image_id);
 
         // Inherit image usage
@@ -517,11 +524,10 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 }
 
 ImageId TextureCache::ExpandImage(const ImageInfo& info, BindingType binding, ImageId image_id) {
-    const bool enable_storage =
-        NeedsStorageUsage(binding) ||
-        bool(slot_images[image_id].usage_flags & vk::ImageUsageFlagBits::eStorage);
+    const auto requested_usage =
+        slot_images[image_id].usage_flags | RequiredImageUsage(binding);
     const auto new_image_id = slot_images.insert(instance, scheduler, blit_helper, slot_image_views,
-                                                 info, enable_storage);
+                                                 info, requested_usage);
     RegisterImage(new_image_id);
 
     auto& src_image = slot_images[image_id];
@@ -543,14 +549,15 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, BindingType binding, Im
 
 ImageId TextureCache::UpgradeImageUsage(ImageId image_id, BindingType binding) {
     auto& src_image = slot_images[image_id];
-    if (!NeedsStorageUsage(binding) ||
-        bool(src_image.usage_flags & vk::ImageUsageFlagBits::eStorage)) {
+    const auto required_usage = RequiredImageUsage(binding);
+    if ((src_image.usage_flags & required_usage) == required_usage) {
         return image_id;
     }
 
     const ImageInfo info = src_image.info;
-    const auto new_image_id =
-        slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info, true);
+    const auto requested_usage = src_image.usage_flags | required_usage;
+    const auto new_image_id = slot_images.insert(instance, scheduler, blit_helper, slot_image_views,
+                                                 info, requested_usage);
     RegisterImage(new_image_id);
 
     auto& current_src_image = slot_images[image_id];
@@ -642,7 +649,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     // Create and register a new image
     if (!image_id) {
         image_id = slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info,
-                                      NeedsStorageUsage(desc.type));
+                                      RequiredImageUsage(desc.type));
         RegisterImage(image_id);
     } else {
         image_id = UpgradeImageUsage(image_id, desc.type);
@@ -754,7 +761,8 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
             info.guest_size = desc.info.stencil_size;
             info.size = desc.info.size;
             stencil_id =
-                slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info, false);
+                slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info,
+                                   RequiredImageUsage(BindingType::DepthTarget));
             RegisterImage(stencil_id);
         }
         Image& stencil_image = slot_images[stencil_id];

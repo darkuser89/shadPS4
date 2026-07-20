@@ -18,26 +18,27 @@ using namespace Vulkan;
 Common::IncrementalIdProvider<u64> Image::global_image_uid{};
 
 static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance* instance, const ImageInfo& info,
-                                           bool enable_storage) {
+                                           vk::ImageUsageFlags requested_usage) {
     vk::ImageUsageFlags usage = vk::ImageUsageFlagBits::eTransferSrc |
-                                vk::ImageUsageFlagBits::eTransferDst |
-                                vk::ImageUsageFlagBits::eSampled;
-    if (!info.props.is_block) {
-        if (info.props.is_depth) {
-            usage |= vk::ImageUsageFlagBits::eDepthStencilAttachment;
-        } else {
-            usage |= vk::ImageUsageFlagBits::eColorAttachment;
-            if (instance->IsAttachmentFeedbackLoopLayoutSupported()) {
-                usage |= vk::ImageUsageFlagBits::eAttachmentFeedbackLoopEXT;
-            }
-            if (enable_storage) {
-                usage |= vk::ImageUsageFlagBits::eStorage;
-            }
+                                vk::ImageUsageFlagBits::eTransferDst;
+
+    // Vulkan restricts depth and block-compressed images to a subset of color-image usages. Keep
+    // only usages that can be represented by the backing image; incompatible depth/color aliases
+    // are recreated by the texture cache before reaching this point.
+    vk::ImageUsageFlags allowed_usage = vk::ImageUsageFlagBits::eSampled;
+    if (info.props.is_depth) {
+        allowed_usage |= vk::ImageUsageFlagBits::eDepthStencilAttachment;
+    } else {
+        allowed_usage |= vk::ImageUsageFlagBits::eStorage;
+        if (!info.props.is_block) {
+            allowed_usage |= vk::ImageUsageFlagBits::eColorAttachment;
         }
-    } else if (enable_storage) {
-        // Compressed guest resources may be accessed through an uncompressed storage view.
-        // Extended usage allows the view format to provide the required storage features.
-        usage |= vk::ImageUsageFlagBits::eStorage;
+    }
+    usage |= requested_usage & allowed_usage;
+
+    if (usage & vk::ImageUsageFlagBits::eColorAttachment &&
+        instance->IsAttachmentFeedbackLoopLayoutSupported()) {
+        usage |= vk::ImageUsageFlagBits::eAttachmentFeedbackLoopEXT;
     }
 
     return usage;
@@ -118,7 +119,7 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
 
 Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
              BlitHelper& blit_helper_, Common::SlotVector<ImageView>& slot_image_views_,
-             const ImageInfo& info_, bool enable_storage)
+             const ImageInfo& info_, vk::ImageUsageFlags requested_usage)
     : instance{&instance_}, scheduler{&scheduler_}, blit_helper{&blit_helper_},
       slot_image_views{&slot_image_views_}, info{info_} {
     if (info.pixel_format == vk::Format::eUndefined) {
@@ -140,7 +141,7 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
         flags |= vk::ImageCreateFlagBits::eBlockTexelViewCompatible;
     }
 
-    usage_flags = ImageUsageFlags(instance, info, enable_storage);
+    usage_flags = ImageUsageFlags(instance, info, requested_usage);
     format_features = FormatFeatureFlags(usage_flags);
     if (info.props.is_depth) {
         aspect_mask = vk::ImageAspectFlagBits::eDepth;

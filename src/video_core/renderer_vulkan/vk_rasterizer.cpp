@@ -917,8 +917,12 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         state.color_attachments[cb] = {};
     }
 
-    if (auto image_id = db_desc.first; image_id) {
+    if (auto& image_id = db_desc.first; image_id) {
         auto& desc = db_desc.second;
+        if (auto& old_image = texture_cache.GetImage(image_id);
+            old_image.binding.needs_rebind) {
+            image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
+        }
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
         const auto& image_view = texture_cache.FindDepthTarget(image_id, desc);
         auto& image = texture_cache.GetImage(image_id);
