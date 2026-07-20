@@ -391,6 +391,10 @@ public:
     /// Binds a pipeline unless it is already active for the requested bind point.
     void BindPipeline(vk::PipelineBindPoint bind_point, vk::Pipeline pipeline);
 
+    /// Updates push constants unless the same range is already current for these stages.
+    void PushConstants(vk::PipelineLayout layout, vk::ShaderStageFlags stage_flags, u32 offset,
+                       u32 size, const void* values);
+
     /// Returns the current command buffer tick.
     [[nodiscard]] u64 CurrentTick() const noexcept {
         return master_semaphore.CurrentTick();
@@ -443,6 +447,18 @@ private:
     vk::CommandBuffer current_cmdbuf;
     vk::Pipeline graphics_pipeline;
     vk::Pipeline compute_pipeline;
+    struct PushConstantState {
+        static constexpr size_t CacheSize = 128;
+
+        vk::PipelineLayout layout;
+        vk::ShaderStageFlags stage_flags;
+        std::array<u8, CacheSize> data;
+        u32 offset{};
+        u32 size{};
+        bool valid{};
+    };
+    PushConstantState graphics_push_constants;
+    PushConstantState compute_push_constants;
     std::condition_variable_any event_cv;
     struct PendingOp {
         Common::UniqueFunction<void> callback;

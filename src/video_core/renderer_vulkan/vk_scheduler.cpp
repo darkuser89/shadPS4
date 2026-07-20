@@ -112,6 +112,39 @@ void Scheduler::BindPipeline(vk::PipelineBindPoint bind_point, vk::Pipeline pipe
     *current_pipeline = pipeline;
 }
 
+void Scheduler::PushConstants(vk::PipelineLayout layout, vk::ShaderStageFlags stage_flags,
+                              u32 offset, u32 size, const void* values) {
+    const bool has_compute = bool(stage_flags & vk::ShaderStageFlagBits::eCompute);
+    const bool has_graphics = bool(stage_flags & ~vk::ShaderStageFlagBits::eCompute);
+    if (has_compute && has_graphics) {
+        current_cmdbuf.pushConstants(layout, stage_flags, offset, size, values);
+        graphics_push_constants.valid = false;
+        compute_push_constants.valid = false;
+        return;
+    }
+
+    auto& state = has_compute ? compute_push_constants : graphics_push_constants;
+    if (size > state.data.size()) {
+        current_cmdbuf.pushConstants(layout, stage_flags, offset, size, values);
+        state.valid = false;
+        return;
+    }
+
+    if (state.valid && state.layout == layout && state.stage_flags == stage_flags &&
+        state.offset == offset && state.size == size &&
+        std::memcmp(state.data.data(), values, size) == 0) {
+        return;
+    }
+
+    current_cmdbuf.pushConstants(layout, stage_flags, offset, size, values);
+    state.layout = layout;
+    state.stage_flags = stage_flags;
+    state.offset = offset;
+    state.size = size;
+    std::memcpy(state.data.data(), values, size);
+    state.valid = true;
+}
+
 void Scheduler::Flush(SubmitInfo& info) {
     // When flushing, we only send data to the driver; no waiting is necessary.
     SubmitExecution(info);
@@ -157,6 +190,8 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 
     graphics_pipeline = VK_NULL_HANDLE;
     compute_pipeline = VK_NULL_HANDLE;
+    graphics_push_constants.valid = false;
+    compute_push_constants.valid = false;
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();
