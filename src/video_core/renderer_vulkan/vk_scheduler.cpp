@@ -91,6 +91,27 @@ void Scheduler::EndRendering() {
     current_cmdbuf.endRendering();
 }
 
+void Scheduler::BindPipeline(vk::PipelineBindPoint bind_point, vk::Pipeline pipeline) {
+    vk::Pipeline* current_pipeline{};
+    switch (bind_point) {
+    case vk::PipelineBindPoint::eGraphics:
+        current_pipeline = &graphics_pipeline;
+        break;
+    case vk::PipelineBindPoint::eCompute:
+        current_pipeline = &compute_pipeline;
+        break;
+    default:
+        current_cmdbuf.bindPipeline(bind_point, pipeline);
+        return;
+    }
+
+    if (*current_pipeline == pipeline) {
+        return;
+    }
+    current_cmdbuf.bindPipeline(bind_point, pipeline);
+    *current_pipeline = pipeline;
+}
+
 void Scheduler::Flush(SubmitInfo& info) {
     // When flushing, we only send data to the driver; no waiting is necessary.
     SubmitExecution(info);
@@ -133,6 +154,9 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 
     current_cmdbuf = command_pool.Commit();
     Check(current_cmdbuf.begin(begin_info));
+
+    graphics_pipeline = VK_NULL_HANDLE;
+    compute_pipeline = VK_NULL_HANDLE;
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();

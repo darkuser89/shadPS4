@@ -388,6 +388,9 @@ public:
         return current_cmdbuf;
     }
 
+    /// Binds a pipeline unless it is already active for the requested bind point.
+    void BindPipeline(vk::PipelineBindPoint bind_point, vk::Pipeline pipeline);
+
     /// Returns the current command buffer tick.
     [[nodiscard]] u64 CurrentTick() const noexcept {
         return master_semaphore.CurrentTick();
@@ -438,6 +441,8 @@ private:
     CommandPool command_pool;
     DynamicState dynamic_state;
     vk::CommandBuffer current_cmdbuf;
+    vk::Pipeline graphics_pipeline;
+    vk::Pipeline compute_pipeline;
     std::condition_variable_any event_cv;
     struct PendingOp {
         Common::UniqueFunction<void> callback;
