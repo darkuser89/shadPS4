@@ -22,6 +22,38 @@ namespace VideoCore {
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
 
+static bool NeedsStorageUsage(TextureCache::BindingType binding) {
+    // Render targets may be cleared or otherwise manipulated through compute. Other sampled-only
+    // images stay free of eStorage until the guest actually binds them for shader writes.
+    return binding == TextureCache::BindingType::Storage ||
+           binding == TextureCache::BindingType::RenderTarget;
+}
+
+static u64 HashSampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sampler,
+                       AmdGpu::BorderColorBuffer border_color_base) {
+    // Hash only state that reaches VkSamplerCreateInfo. Several guest-only controls (for example
+    // force_unnormalized and force_degamma) are handled by shader specialization and otherwise
+    // caused identical Vulkan samplers to consume separate cache entries.
+    constexpr u64 Word0Mask = 0x7FFFULL | (0xFFFFFFULL << 32);
+    constexpr u64 Word1Mask = 0x3FFFULL | (0xFULL << 20) | (0x3ULL << 26) | (0x3ULL << 62);
+    struct Key {
+        u64 raw0;
+        u64 raw1;
+        std::array<float, 4> custom_border_color;
+    } key{
+        .raw0 = sampler.raw0 & Word0Mask,
+        .raw1 = sampler.raw1 & Word1Mask,
+    };
+
+    if (sampler.border_color_type == AmdGpu::BorderColor::Custom &&
+        instance.IsCustomBorderColorSupported()) {
+        const auto color_index = sampler.border_color_ptr.Value();
+        const auto colors = border_color_base.Address<const std::array<float, 4>*>();
+        key.custom_border_color = colors[color_index];
+    }
+    return XXH3_64bits(&key, sizeof(key));
+}
+
 TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                            AmdGpu::Liverpool* liverpool_, BufferCache& buffer_cache_,
                            PageManager& tracker_)
@@ -226,8 +258,11 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
     if (recreate) {
         auto new_info = requested_info;
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
-        const auto new_image_id =
-            slot_images.insert(instance, scheduler, blit_helper, slot_image_views, new_info);
+        const bool enable_storage =
+            NeedsStorageUsage(binding) ||
+            bool(cache_image.usage_flags & vk::ImageUsageFlagBits::eStorage);
+        const auto new_image_id = slot_images.insert(instance, scheduler, blit_helper,
+                                                     slot_image_views, new_info, enable_storage);
         RegisterImage(new_image_id);
 
         // Inherit image usage
@@ -296,13 +331,13 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
         // Compressed view of uncompressed image with same block size.
         if (image_info.props.is_block && !cache_image.info.props.is_block) {
-            return {ExpandImage(image_info, cache_image_id), -1, -1};
+            return {ExpandImage(image_info, binding, cache_image_id), -1, -1};
         }
 
         if (image_info.guest_size == cache_image.info.guest_size &&
             (image_info.type == AmdGpu::ImageType::Color3D ||
              cache_image.info.type == AmdGpu::ImageType::Color3D)) {
-            return {ExpandImage(image_info, cache_image_id), -1, -1};
+            return {ExpandImage(image_info, binding, cache_image_id), -1, -1};
         }
 
         // Size and resources are less than or equal, use image view.
@@ -318,7 +353,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         // Size and resources are greater, expand the image.
         if (image_info.type == cache_image.info.type &&
             image_info.resources > cache_image.info.resources) {
-            return {ExpandImage(image_info, cache_image_id), -1, -1};
+            return {ExpandImage(image_info, binding, cache_image_id), -1, -1};
         }
 
         // Size is greater but resources are not, because the tiling mode is different.
@@ -481,9 +516,12 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
     return {merged_image_id, -1, -1};
 }
 
-ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
-    const auto new_image_id =
-        slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info);
+ImageId TextureCache::ExpandImage(const ImageInfo& info, BindingType binding, ImageId image_id) {
+    const bool enable_storage =
+        NeedsStorageUsage(binding) ||
+        bool(slot_images[image_id].usage_flags & vk::ImageUsageFlagBits::eStorage);
+    const auto new_image_id = slot_images.insert(instance, scheduler, blit_helper, slot_image_views,
+                                                 info, enable_storage);
     RegisterImage(new_image_id);
 
     auto& src_image = slot_images[image_id];
@@ -500,6 +538,40 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
 
     TrackImage(new_image_id);
     new_image.flags &= ~ImageFlagBits::Dirty;
+    return new_image_id;
+}
+
+ImageId TextureCache::UpgradeImageUsage(ImageId image_id, BindingType binding) {
+    auto& src_image = slot_images[image_id];
+    if (!NeedsStorageUsage(binding) ||
+        bool(src_image.usage_flags & vk::ImageUsageFlagBits::eStorage)) {
+        return image_id;
+    }
+
+    const ImageInfo info = src_image.info;
+    const auto new_image_id =
+        slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info, true);
+    RegisterImage(new_image_id);
+
+    auto& current_src_image = slot_images[image_id];
+    auto& new_image = slot_images[new_image_id];
+    new_image.usage = current_src_image.usage;
+    new_image.tick_accessed_last = current_src_image.tick_accessed_last;
+    new_image.hash = current_src_image.hash;
+    new_image.mip_hashes = current_src_image.mip_hashes;
+    new_image.depth_id = current_src_image.depth_id;
+    new_image.depth_uid = current_src_image.depth_uid;
+    if (False(current_src_image.flags & ImageFlagBits::Dirty)) {
+        new_image.CopyImage(current_src_image);
+        new_image.flags &= ~ImageFlagBits::Dirty;
+    }
+    new_image.flags |= current_src_image.flags & ImageFlagBits::GpuModified;
+
+    if (current_src_image.binding.is_bound || current_src_image.binding.is_target) {
+        current_src_image.binding.needs_rebind = 1u;
+    }
+    FreeImage(image_id);
+    TrackImage(new_image_id);
     return new_image_id;
 }
 
@@ -569,8 +641,11 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     // Create and register a new image
     if (!image_id) {
-        image_id = slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info);
+        image_id = slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info,
+                                      NeedsStorageUsage(desc.type));
         RegisterImage(image_id);
+    } else {
+        image_id = UpgradeImageUsage(image_id, desc.type);
     }
 
     Image& image = slot_images[image_id];
@@ -679,7 +754,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
             info.guest_size = desc.info.stencil_size;
             info.size = desc.info.size;
             stencil_id =
-                slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info);
+                slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info, false);
             RegisterImage(stencil_id);
         }
         Image& stencil_image = slot_images[stencil_id];
@@ -787,7 +862,7 @@ void TextureCache::RefreshImage(Image& image) {
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
                                      AmdGpu::BorderColorBuffer border_color_base) {
-    const u64 hash = XXH3_64bits(&sampler, sizeof(sampler));
+    const u64 hash = HashSampler(instance, sampler, border_color_base);
 
     std::scoped_lock lock{samplers_mutex};
     const auto [it, new_sampler] = samplers.try_emplace(hash, instance, sampler, border_color_base);
@@ -1007,11 +1082,11 @@ void TextureCache::GarbageCollectImages() {
 }
 
 void TextureCache::GarbageCollectSamplers() {
+    std::scoped_lock lock{samplers_mutex};
     total_used_samplers = samplers.size();
     if (total_used_samplers < trigger_gc_samplers) {
         return;
     }
-    std::scoped_lock lock{samplers_mutex};
     bool pressured = false;
     bool aggresive = false;
     u64 ticks_to_destroy = 0;
@@ -1029,9 +1104,15 @@ void TextureCache::GarbageCollectSamplers() {
             return true;
         }
         --num_deletions;
-        const size_t lru_id = samplers.at(hash).lru_id;
+        auto retired_sampler = std::move(samplers.at(hash));
+        const size_t lru_id = retired_sampler.lru_id;
         samplers.erase(hash);
         sampler_lru_cache.Free(lru_id);
+        --total_used_samplers;
+        // Descriptor sets recorded before this GC may still reference the sampler. Keep the Vulkan
+        // object alive until the current GPU tick has completed instead of destroying it while it
+        // can still be in flight.
+        scheduler.DeferOperation([sampler = std::move(retired_sampler)] {});
         return false;
     };
 

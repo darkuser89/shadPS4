@@ -23,7 +23,9 @@ namespace {
 
 std::mutex submit_mutex{};
 u32 num_requests{};
+bool accept_requests{};
 std::condition_variable_any request_cv{};
+std::condition_variable requests_drained_cv{};
 std::queue<std::packaged_task<void()>> req_queue{};
 std::mutex m_request{};
 
@@ -47,7 +49,14 @@ void ProcessIO(const std::stop_token& stoken) {
             break;
         }
 
-        while (num_requests) {
+        while (true) {
+            {
+                std::scoped_lock lock{submit_mutex};
+                if (num_requests == 0) {
+                    break;
+                }
+            }
+
             std::packaged_task<void()> request{};
             {
                 std::scoped_lock lock{m_request};
@@ -60,10 +69,13 @@ void ProcessIO(const std::stop_token& stoken) {
 
             if (request.valid()) {
                 request();
-                request.get_future().wait();
             }
 
-            --num_requests;
+            {
+                std::scoped_lock lock{submit_mutex};
+                --num_requests;
+            }
+            requests_drained_cv.notify_all();
         }
     }
 }
@@ -82,6 +94,9 @@ constexpr std::string GetBlobFileExtension(BlobType type) {
     case BlobType::ShaderProfile: {
         return "bin";
     }
+    case BlobType::VulkanPipelineCache: {
+        return "vkc";
+    }
     default:
         UNREACHABLE();
     }
@@ -97,6 +112,7 @@ void DataBase::Open() {
     using namespace Common::FS;
     if (EmulatorSettings.IsPipelineCacheArchived()) {
         mz_zip_zero_struct(&zip_ar);
+        ar_is_read_only = true;
 
         cache_path = GetUserPath(PathType::CacheDir) /
                      std::filesystem::path{game_info.GameSerial()}.replace_extension(".zip");
@@ -108,6 +124,7 @@ void DataBase::Open() {
                      cache_path.string().c_str());
             mz_zip_reader_end(&zip_ar);
             mz_zip_writer_init_file(&zip_ar, cache_path.string().c_str(), 0);
+            ar_is_read_only = false;
         }
     } else {
         cache_path = GetUserPath(PathType::CacheDir) / game_info.GameSerial();
@@ -117,51 +134,94 @@ void DataBase::Open() {
     }
 
     io_worker = std::jthread{ProcessIO};
-    opened = true;
+    {
+        std::scoped_lock lock{submit_mutex};
+        accept_requests = true;
+        opened.store(true, std::memory_order_release);
+    }
 }
 
 void DataBase::Close() {
-    if (!IsOpened()) {
-        return;
+    // Reject new producers first, then drain every request that was already accepted.
+    {
+        std::scoped_lock lock{submit_mutex};
+        if (!opened.exchange(false, std::memory_order_acq_rel)) {
+            return;
+        }
+        accept_requests = false;
     }
 
+    Flush();
     io_worker.request_stop();
     io_worker.join();
 
     if (EmulatorSettings.IsPipelineCacheArchived()) {
-        mz_zip_writer_finalize_archive(&zip_ar);
-        mz_zip_writer_end(&zip_ar);
+        if (ar_is_read_only) {
+            mz_zip_reader_end(&zip_ar);
+        } else {
+            mz_zip_writer_finalize_archive(&zip_ar);
+            mz_zip_writer_end(&zip_ar);
+        }
     }
 
-    opened = false;
     LOG_INFO(Render, "Cache dumped");
+}
+
+bool DataBase::Reset() {
+    if (!IsOpened()) {
+        return false;
+    }
+
+    Close();
+    std::error_code ec;
+    std::filesystem::remove_all(cache_path, ec);
+    if (ec) {
+        LOG_WARNING(Render, "Failed to remove incompatible cache {}: {}", cache_path.string(),
+                    ec.message());
+        return false;
+    }
+    Open();
+    FinishPreload();
+    return IsOpened();
+}
+
+void DataBase::Flush() {
+    if (!io_worker.joinable()) {
+        return;
+    }
+    std::unique_lock lock{submit_mutex};
+    requests_drained_cv.wait(lock, [] { return num_requests == 0; });
 }
 
 template <typename T>
 bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector<T>&& v) {
-    {
-        auto request = std::packaged_task<void()>{[=]() {
-            auto path{path_};
+    auto request =
+        std::packaged_task<void()>{[type, path = std::move(path_), data = std::move(v)]() mutable {
             path.replace_extension(GetBlobFileExtension(type));
             if (EmulatorSettings.IsPipelineCacheArchived()) {
                 ASSERT_MSG(!ar_is_read_only,
                            "The archive is read-only. Did you forget to call `FinishPreload`?");
-                if (!mz_zip_writer_add_mem(&zip_ar, path.string().c_str(), v.data(),
-                                           v.size() * sizeof(T), MZ_BEST_COMPRESSION)) {
+                if (!mz_zip_writer_add_mem(&zip_ar, path.string().c_str(), data.data(),
+                                           data.size() * sizeof(T), MZ_BEST_COMPRESSION)) {
                     LOG_ERROR(Render, "Failed to add {} to the archive", path.string().c_str());
                 }
             } else {
                 using namespace Common::FS;
                 const auto file = IOFile{path, FileAccessMode::Create};
-                file.Write(v);
+                file.Write(data);
             }
         }};
+
+    {
+        std::scoped_lock submit_lock{submit_mutex};
+        if (!accept_requests) {
+            return false;
+        }
         std::scoped_lock lock{m_request};
         req_queue.emplace(std::move(request));
+        ++num_requests;
     }
 
-    std::scoped_lock lk{submit_mutex};
-    ++num_requests;
     request_cv.notify_one();
     return true;
 }
@@ -260,7 +320,7 @@ void DataBase::ForEachBlob(BlobType type, const std::function<void(std::vector<u
 }
 
 void DataBase::FinishPreload() {
-    if (EmulatorSettings.IsPipelineCacheArchived()) {
+    if (EmulatorSettings.IsPipelineCacheArchived() && ar_is_read_only) {
         mz_zip_writer_init_from_reader(&zip_ar, cache_path.string().c_str());
         ar_is_read_only = false;
     }

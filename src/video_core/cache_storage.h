@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include "common/path_util.h"
 #include "common/singleton.h"
 #include "common/types.h"
@@ -18,6 +19,7 @@ enum class BlobType : u32 {
     ShaderBinary,
     PipelineKey,
     ShaderProfile,
+    VulkanPipelineCache,
 };
 
 class DataBase {
@@ -28,10 +30,12 @@ public:
 
     void Open();
     void Close();
+    [[nodiscard]] bool Reset();
     [[nodiscard]] bool IsOpened() const {
-        return opened;
+        return opened.load(std::memory_order_acquire);
     }
     void FinishPreload();
+    void Flush();
 
     bool Save(BlobType type, const std::string& name, std::vector<u8>&& data);
     bool Save(BlobType type, const std::string& name, std::vector<u32>&& data);
@@ -44,7 +48,7 @@ public:
 private:
     std::jthread io_worker{};
     std::filesystem::path cache_path{};
-    bool opened{};
+    std::atomic_bool opened{};
 };
 
 } // namespace Storage

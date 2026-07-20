@@ -11,13 +11,23 @@
 #include "core/libraries/videoout/video_out.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "core/platform.h"
+#include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 
 namespace Libraries::VideoOut {
 
 static std::unique_ptr<VideoOutDriver> driver;
+
+void FlushPipelineCache() {
+    if (presenter) {
+        presenter->GetRasterizer().GetPipelineCache().Sync();
+    } else {
+        Storage::DataBase::Instance().Close();
+    }
+}
 
 void PS4_SYSV_ABI sceVideoOutSetBufferAttribute(BufferAttribute* attribute, PixelFormat pixelFormat,
                                                 u32 tilingMode, u32 aspectRatio, u32 width,

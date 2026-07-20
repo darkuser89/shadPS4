@@ -36,11 +36,11 @@
 #include "core/libraries/libs.h"
 #include "core/libraries/np/np_trophy.h"
 #include "core/libraries/save_data/save_backup.h"
+#include "core/libraries/videoout/video_out.h"
 #include "core/linker.h"
 #include "core/memory.h"
 #include "core/user_settings.h"
 #include "emulator.h"
-#include "video_core/cache_storage.h"
 #include "video_core/renderdoc.h"
 
 #ifdef _WIN32
@@ -537,7 +537,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     }
 
     UpdatePlayTime(id);
-    Storage::DataBase::Instance().Close();
+    Libraries::VideoOut::FlushPipelineCache();
 
     std::quick_exit(0);
 }

@@ -293,6 +293,14 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     if (info.uses_group_ballot) {
         ctx.AddCapability(spv::Capability::GroupNonUniformBallot);
     }
+    if (info.uses_group_vote) {
+        if (profile.SupportsSubgroup(SubgroupFeature::Vote) ||
+            !profile.SupportsSubgroup(SubgroupFeature::Ballot)) {
+            ctx.AddCapability(spv::Capability::GroupNonUniformVote);
+        } else {
+            ctx.AddCapability(spv::Capability::GroupNonUniformBallot);
+        }
+    }
     const auto stage = info.l_stage;
     if (stage == LogicalStage::Vertex) {
         ctx.AddExtension("SPV_KHR_shader_draw_parameters");

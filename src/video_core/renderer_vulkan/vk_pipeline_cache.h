@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <mutex>
 #include <variant>
 #include <tsl/robin_map.h>
 #include "shader_recompiler/profile.h"
@@ -74,7 +75,7 @@ public:
 
     bool LoadComputePipeline(Serialization::Archive& ar);
     bool LoadGraphicsPipeline(Serialization::Archive& ar);
-    bool LoadPipelineStage(Serialization::Archive& ar, size_t stage);
+    bool LoadPipelineStage(size_t stage, u64 permutation_hash);
 
     const GraphicsPipeline* GetGraphicsPipeline();
 
@@ -99,6 +100,9 @@ private:
     bool RefreshGraphicsKey();
     bool RefreshGraphicsStages();
     bool RefreshComputeKey();
+    [[nodiscard]] bool DeferPipelineCreationDuringWarmup() const;
+    void RestoreDriverPipelineCache();
+    void SaveDriverPipelineCache();
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::Stage stage, size_t perm_idx,
                     std::string_view ext);
@@ -119,10 +123,18 @@ private:
     AmdGpu::Liverpool* liverpool;
     DescriptorHeap desc_heap;
     vk::UniquePipelineCache pipeline_cache;
+    // VkPipelineCache requires external synchronization between pipeline creation and
+    // serialization. Normal rendering owns it from the GPU thread, while shutdown runs on main.
+    std::mutex driver_pipeline_cache_mutex;
     vk::UniquePipelineLayout pipeline_layout;
     Shader::Profile profile{};
     Shader::Pools pools;
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
+    struct RestoredShaderStage {
+        Program* program;
+        size_t permutation_index;
+    };
+    tsl::robin_map<u64, RestoredShaderStage> restored_shader_stages;
     tsl::robin_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_pipelines;
     tsl::robin_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>> graphics_pipelines;
     std::array<Shader::RuntimeInfo, MaxShaderStages> runtime_infos{};
@@ -132,6 +144,8 @@ private:
     GraphicsPipelineKey graphics_key{};
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
+    bool driver_pipeline_cache_dirty{};
+    u64 driver_pipeline_cache_hash{};
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,

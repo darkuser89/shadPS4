@@ -215,6 +215,12 @@ bool Instance::CreateDevice() {
     vk13_props = properties_chain.get<vk::PhysicalDeviceVulkan13Properties>();
     push_descriptor_props = properties_chain.get<vk::PhysicalDevicePushDescriptorPropertiesKHR>();
     LOG_INFO(Render_Vulkan, "Physical device subgroup size {}", vk11_props.subgroupSize);
+    LOG_INFO(Render_Vulkan, "- subgroup stages: {}",
+             vk::to_string(vk11_props.subgroupSupportedStages));
+    LOG_INFO(Render_Vulkan, "- subgroup operations: {}",
+             vk::to_string(vk11_props.subgroupSupportedOperations));
+    LOG_INFO(Render_Vulkan, "- subgroup quad operations in all stages: {}",
+             vk11_props.subgroupQuadOperationsInAllStages);
 
     if (available_extensions.empty()) {
         LOG_CRITICAL(Render_Vulkan, "No extensions supported by device.");

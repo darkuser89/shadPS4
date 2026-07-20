@@ -24,6 +24,13 @@ void ResourceTrackingPassStub(IR::Program& program, const Profile& profile);
 }
 
 std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst) {
+    Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.subgroup_size = 32;
+    return TranslateToSpirv(raw_gcn_inst, profile);
+}
+
+std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst, const Profile& profile) {
     std::array<u32, 2> provided_inst{static_cast<u32>(raw_gcn_inst & 0xFFFFFFFFU),
                                      static_cast<u32>(raw_gcn_inst >> 32)};
     std::array<u32, 2> store{
@@ -56,10 +63,6 @@ std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst) {
     program.syntax_list.emplace_back();
     program.syntax_list.back().type = IR::AbstractSyntaxNode::Type::Return;
     program.post_order_blocks = Shader::IR::PostOrder(program.syntax_list.front());
-
-    Profile profile{};
-    profile.supported_spirv = 0x00010600;
-    profile.subgroup_size = 32;
 
     RuntimeInfo runtime_info{};
     runtime_info.Initialize(Stage::Compute);
@@ -94,4 +97,37 @@ std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst) {
     const auto spirv = Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
 
     return spirv;
+}
+
+std::vector<u32> EmitGroupAnyToSpirv(const Profile& profile) {
+    Shader::Info info{};
+    info.stage = Stage::Fragment;
+    info.l_stage = LogicalStage::Fragment;
+
+    IR::Program program{info};
+    Pools pools{};
+    IR::Block* block = pools.block_pool.Create(pools.inst_pool);
+    program.blocks.push_back(block);
+    program.syntax_list.emplace_back();
+    program.syntax_list.back().type = IR::AbstractSyntaxNode::Type::Block;
+    program.syntax_list.back().data.block = block;
+    program.syntax_list.emplace_back();
+    program.syntax_list.back().type = IR::AbstractSyntaxNode::Type::Return;
+    program.post_order_blocks = Shader::IR::PostOrder(program.syntax_list.front());
+
+    IR::IREmitter ir{*block};
+    const auto any = ir.GroupAny(ir.GetThreadBitScalarReg(IR::ScalarReg::S0));
+    ir.Discard(any);
+
+    RuntimeInfo runtime_info{};
+    runtime_info.Initialize(Stage::Fragment);
+
+    Shader::Optimization::SsaRewritePass(program.post_order_blocks);
+    Shader::Optimization::IdentityRemovalPass(program.blocks);
+    Shader::Optimization::ConstantPropagationPass(program.blocks);
+    Shader::Optimization::DeadCodeEliminationPass(program);
+    Shader::Optimization::CollectShaderInfoPass(program, profile);
+
+    Backend::Bindings bindings{};
+    return Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
 }

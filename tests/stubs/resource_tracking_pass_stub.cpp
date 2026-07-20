@@ -10,7 +10,16 @@
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
+#include "video_core/amdgpu/guest_address.h"
 #include "video_core/amdgpu/resource.h"
+
+namespace AmdGpu {
+
+VAddr ResolveGuestAddress(VAddr address) {
+    return address;
+}
+
+} // namespace AmdGpu
 
 namespace Shader::Optimization {
 namespace {

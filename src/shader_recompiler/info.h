@@ -138,6 +138,7 @@ struct Info : InfoPersistent {
     bool uses_lane_id{};
     bool uses_group_quad{};
     bool uses_group_ballot{};
+    bool uses_group_vote{};
     IR::Type shared_types{};
     bool uses_fp16{};
     bool uses_fp64{};

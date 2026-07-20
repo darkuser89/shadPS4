@@ -7,6 +7,18 @@
 
 namespace Shader {
 
+// Values match VkSubgroupFeatureFlagBits without coupling the shader recompiler to Vulkan.
+enum class SubgroupFeature : u32 {
+    Basic = 1U << 0,
+    Vote = 1U << 1,
+    Arithmetic = 1U << 2,
+    Ballot = 1U << 3,
+    Shuffle = 1U << 4,
+    ShuffleRelative = 1U << 5,
+    Clustered = 1U << 6,
+    Quad = 1U << 7,
+};
+
 struct Profile {
     u64 max_ubo_size{};
     u32 max_viewport_width{};
@@ -14,6 +26,7 @@ struct Profile {
     u32 max_shared_memory_size{};
     u32 supported_spirv{0x00010000};
     u32 subgroup_size{};
+    u32 subgroup_supported_operations{};
     bool support_int8{};
     bool support_int16{};
     bool support_int64{};
@@ -53,6 +66,10 @@ struct Profile {
     bool supports_shader_stencil_export{};
 
     bool operator==(const Profile&) const = default;
+
+    [[nodiscard]] bool SupportsSubgroup(SubgroupFeature feature) const {
+        return (subgroup_supported_operations & static_cast<u32>(feature)) != 0;
+    }
 };
 
 } // namespace Shader

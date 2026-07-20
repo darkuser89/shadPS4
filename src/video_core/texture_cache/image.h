@@ -82,7 +82,8 @@ class BlitHelper;
 
 struct Image {
     Image(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler, BlitHelper& blit_helper,
-          Common::SlotVector<ImageView>& slot_image_views, const ImageInfo& info);
+          Common::SlotVector<ImageView>& slot_image_views, const ImageInfo& info,
+          bool enable_storage);
     ~Image();
 
     Image(const Image&) = delete;

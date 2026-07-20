@@ -230,7 +230,9 @@ public:
 
     /// Returns true if the subgroup size can be set to match guest subgroup size
     bool IsSubgroupSize64Supported() const {
-        return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64;
+        return vk13_features.subgroupSizeControl && vk13_props.minSubgroupSize <= 64 &&
+               vk13_props.maxSubgroupSize >= 64 &&
+               bool(vk13_props.requiredSubgroupSizeStages & vk::ShaderStageFlagBits::eCompute);
     }
 
     /// Returns true when VK_KHR_workgroup_memory_explicit_layout is supported.
@@ -333,6 +335,11 @@ public:
     /// Returns the subgroup size of the selected physical device.
     u32 SubgroupSize() const {
         return vk11_props.subgroupSize;
+    }
+
+    /// Returns the subgroup operation classes supported by the device.
+    vk::SubgroupFeatureFlags SubgroupSupportedOperations() const {
+        return vk11_props.subgroupSupportedOperations;
     }
 
     /// Returns the maximum size of compute shared memory.

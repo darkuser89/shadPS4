@@ -43,6 +43,16 @@ Id EmitBallotFindLsb(EmitContext& ctx, Id mask) {
 }
 
 Id EmitGroupAny(EmitContext& ctx, Id bit) {
+    if (!ctx.profile.SupportsSubgroup(SubgroupFeature::Vote) &&
+        ctx.profile.SupportsSubgroup(SubgroupFeature::Ballot)) {
+        const Id ballot = ctx.OpGroupNonUniformBallot(ctx.U32[4], SubgroupScope(ctx), bit);
+        Id bits = ctx.OpCompositeExtract(ctx.U32[1], ballot, 0U);
+        for (u32 index = 1; index < 4; ++index) {
+            bits = ctx.OpBitwiseOr(ctx.U32[1], bits,
+                                   ctx.OpCompositeExtract(ctx.U32[1], ballot, index));
+        }
+        return ctx.OpINotEqual(ctx.U1[1], bits, ctx.u32_zero_value);
+    }
     return ctx.OpGroupNonUniformAny(ctx.U1[1], SubgroupScope(ctx), bit);
 }
 

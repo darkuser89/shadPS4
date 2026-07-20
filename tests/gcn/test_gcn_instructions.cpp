@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include <half.hpp>
+#include <spirv/unified1/spirv.hpp>
 
 #include "gcn_test_runner.hpp"
 #include "instructions.hpp"
@@ -25,6 +26,65 @@ struct F32x2 {
     float a;
     float b;
 };
+
+static bool ContainsSpirvOpcode(std::span<const u32> spirv, spv::Op opcode) {
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 word_count = word >> 16;
+        if (word_count == 0 || offset + word_count > spirv.size()) {
+            return false;
+        }
+        if ((word & 0xffffu) == static_cast<u32>(opcode)) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
+static bool ContainsSpirvCapability(std::span<const u32> spirv, spv::Capability capability) {
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 word_count = word >> 16;
+        if (word_count == 0 || offset + word_count > spirv.size()) {
+            return false;
+        }
+        if ((word & 0xffffu) == static_cast<u32>(spv::OpCapability) && word_count >= 2 &&
+            spirv[offset + 1] == static_cast<u32>(capability)) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
+TEST(SpirvEmission, group_any_falls_back_to_ballot_when_vote_is_unavailable) {
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.subgroup_size = 32;
+    profile.subgroup_supported_operations = static_cast<u32>(Shader::SubgroupFeature::Ballot);
+
+    const auto spirv = EmitGroupAnyToSpirv(profile);
+
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::OpGroupNonUniformBallot));
+    EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::OpGroupNonUniformAny));
+    EXPECT_TRUE(ContainsSpirvCapability(spirv, spv::CapabilityGroupNonUniformBallot));
+    EXPECT_FALSE(ContainsSpirvCapability(spirv, spv::CapabilityGroupNonUniformVote));
+}
+
+TEST(SpirvEmission, group_any_uses_vote_when_supported) {
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.subgroup_size = 32;
+    profile.subgroup_supported_operations = static_cast<u32>(Shader::SubgroupFeature::Vote);
+
+    const auto spirv = EmitGroupAnyToSpirv(profile);
+
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::OpGroupNonUniformAny));
+    EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::OpGroupNonUniformBallot));
+    EXPECT_TRUE(ContainsSpirvCapability(spirv, spv::CapabilityGroupNonUniformVote));
+    EXPECT_FALSE(ContainsSpirvCapability(spirv, spv::CapabilityGroupNonUniformBallot));
+}
 
 // Example
 // TEST_F(GcnTest, test_name) {

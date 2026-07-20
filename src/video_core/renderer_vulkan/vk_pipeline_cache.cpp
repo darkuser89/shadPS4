@@ -22,6 +22,11 @@
 
 namespace Vulkan {
 
+static_assert(static_cast<u32>(Shader::SubgroupFeature::Vote) ==
+              static_cast<u32>(VK_SUBGROUP_FEATURE_VOTE_BIT));
+static_assert(static_cast<u32>(Shader::SubgroupFeature::Ballot) ==
+              static_cast<u32>(VK_SUBGROUP_FEATURE_BALLOT_BIT));
+
 using Shader::LogicalStage;
 using Shader::Output;
 using Shader::Stage;
@@ -260,6 +265,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .max_shared_memory_size = instance.MaxComputeSharedMemorySize(),
         .supported_spirv = SpirvVersion1_6,
         .subgroup_size = instance.SubgroupSize(),
+        .subgroup_supported_operations = static_cast<u32>(
+            static_cast<VkSubgroupFeatureFlags>(instance.SubgroupSupportedOperations())),
         .support_int8 = instance.IsShaderInt8Supported(),
         .support_int16 = instance.IsShaderInt16Supported(),
         .support_int64 = instance.IsShaderInt64Supported(),
@@ -299,8 +306,10 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_fragment_shader_barycentric = instance_.IsFragmentShaderBarycentricSupported(),
         .needs_manual_interpolation = instance.IsFragmentShaderBarycentricSupported() &&
                                       instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
-        .needs_lds_barriers = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ||
-                              instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
+        // GCN workgroups can rely on implicit Wave64 lockstep for LDS access. A host subgroup
+        // narrower than 64 needs explicit barriers unless compute pipelines can request Wave64.
+        .needs_lds_barriers =
+            !instance.IsSubgroupSize64Supported() && instance.SubgroupSize() != 64,
         .needs_buffer_offsets = instance.StorageMinAlignment() > 4,
         .needs_unorm_fixup = instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
@@ -318,22 +327,37 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
 
 PipelineCache::~PipelineCache() = default;
 
+bool PipelineCache::DeferPipelineCreationDuringWarmup() const {
+    // KosmicKrisp translates Vulkan pipelines through NIR to Metal. Recreating every serialized
+    // pipeline before the first frame front-loads that translation even when a title does not use
+    // most of its historical cache during the current session. Shader modules are still restored
+    // during warmup; the comparatively expensive VkPipeline objects are created on first use.
+    return instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp;
+}
+
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
     if (!RefreshGraphicsKey()) {
         return nullptr;
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
-    if (is_new) {
+    if (is_new || !it.value()) {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
 
         GraphicsPipeline::SerializationSupport sdata{};
-        it.value() = std::make_unique<GraphicsPipeline>(
-            instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-            runtime_infos, fetch_shader, modules, sdata, false);
-
-        RegisterPipelineData(graphics_key, pipeline_hash, sdata);
-        ++num_new_pipelines;
+        {
+            // VkPipelineCache is externally synchronized, but the already-created pipeline map is
+            // GPU-thread owned. Keep this mutex off the common cache-hit path.
+            std::scoped_lock cache_lock{driver_pipeline_cache_mutex};
+            it.value() = std::make_unique<GraphicsPipeline>(
+                instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
+                runtime_infos, fetch_shader, modules, sdata, false);
+            driver_pipeline_cache_dirty = true;
+        }
+        if (is_new) {
+            RegisterPipelineData(graphics_key, pipeline_hash, sdata);
+            ++num_new_pipelines;
+        }
 
         if (EmulatorSettings.IsShaderCollect()) {
             for (auto stage = 0; stage < MaxShaderStages; ++stage) {
@@ -353,16 +377,22 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
         return nullptr;
     }
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
-    if (is_new) {
+    if (is_new || !it.value()) {
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
 
         ComputePipeline::SerializationSupport sdata{};
-        it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
-                                                       *pipeline_cache, compute_key, *infos[0],
-                                                       modules[0], sdata, false);
-        RegisterPipelineData(compute_key, sdata);
-        ++num_new_pipelines;
+        {
+            std::scoped_lock cache_lock{driver_pipeline_cache_mutex};
+            it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
+                                                           *pipeline_cache, compute_key, *infos[0],
+                                                           modules[0], sdata, false);
+            driver_pipeline_cache_dirty = true;
+        }
+        if (is_new) {
+            RegisterPipelineData(compute_key, sdata);
+            ++num_new_pipelines;
+        }
 
         if (EmulatorSettings.IsShaderCollect()) {
             auto& m = modules[0];
@@ -624,14 +654,13 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
-
     const auto name = GetShaderName(info.stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
     if (EmulatorSettings.IsShaderCollect()) {
         DebugState.CollectShader(name, info.l_stage, module, spv, code,
                                  patch ? *patch : std::span<const u32>{}, is_patched);
     }
+    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
     return module;
 }
 

@@ -17,8 +17,8 @@ using namespace Vulkan;
 
 Common::IncrementalIdProvider<u64> Image::global_image_uid{};
 
-static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance* instance,
-                                           const ImageInfo& info) {
+static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance* instance, const ImageInfo& info,
+                                           bool enable_storage) {
     vk::ImageUsageFlags usage = vk::ImageUsageFlagBits::eTransferSrc |
                                 vk::ImageUsageFlagBits::eTransferDst |
                                 vk::ImageUsageFlagBits::eSampled;
@@ -30,15 +30,13 @@ static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance* instance,
             if (instance->IsAttachmentFeedbackLoopLayoutSupported()) {
                 usage |= vk::ImageUsageFlagBits::eAttachmentFeedbackLoopEXT;
             }
-            // Always create images with storage flag to avoid needing re-creation in case of e.g
-            // compute clears This sacrifices a bit of performance but is less work. ExtendedUsage
-            // flag is also used.
-            usage |= vk::ImageUsageFlagBits::eStorage;
+            if (enable_storage) {
+                usage |= vk::ImageUsageFlagBits::eStorage;
+            }
         }
-    } else {
-        // Similarly to above, we specify storage usage. This is typically not supported by
-        // compressed formats, but may be used for uncompressed views. In order to satisfy this,
-        // we will also specify the extended usage bit.
+    } else if (enable_storage) {
+        // Compressed guest resources may be accessed through an uncompressed storage view.
+        // Extended usage allows the view format to provide the required storage features.
         usage |= vk::ImageUsageFlagBits::eStorage;
     }
 
@@ -78,8 +76,8 @@ static vk::FormatFeatureFlags2 FormatFeatureFlags(const vk::ImageUsageFlags usag
     if (usage_flags & vk::ImageUsageFlagBits::eDepthStencilAttachment) {
         feature_flags |= vk::FormatFeatureFlagBits2::eDepthStencilAttachment;
     }
-    // Note: StorageImage is intentionally ignored for now since it is always set, and can mess up
-    // compatibility checks.
+    // StorageImage is intentionally checked on the view format instead. Images use extended usage
+    // because compressed guest resources can be written through compatible uncompressed views.
     return feature_flags;
 }
 
@@ -120,7 +118,7 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
 
 Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
              BlitHelper& blit_helper_, Common::SlotVector<ImageView>& slot_image_views_,
-             const ImageInfo& info_)
+             const ImageInfo& info_, bool enable_storage)
     : instance{&instance_}, scheduler{&scheduler_}, blit_helper{&blit_helper_},
       slot_image_views{&slot_image_views_}, info{info_} {
     if (info.pixel_format == vk::Format::eUndefined) {
@@ -142,7 +140,7 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
         flags |= vk::ImageCreateFlagBits::eBlockTexelViewCompatible;
     }
 
-    usage_flags = ImageUsageFlags(instance, info);
+    usage_flags = ImageUsageFlags(instance, info, enable_storage);
     format_features = FormatFeatureFlags(usage_flags);
     if (info.props.is_depth) {
         aspect_mask = vk::ImageAspectFlagBits::eDepth;

@@ -131,7 +131,7 @@ public:
                                               ImageId cache_img_id);
 
     /// Creates a new image with provided image info and copies subresources from image_id
-    [[nodiscard]] ImageId ExpandImage(const ImageInfo& info, ImageId image_id);
+    [[nodiscard]] ImageId ExpandImage(const ImageInfo& info, BindingType binding, ImageId image_id);
 
     /// Reuploads image contents.
     void RefreshImage(Image& image);
@@ -322,6 +322,8 @@ private:
         UnregisterImage(image_id);
         DeleteImage(image_id);
     }
+
+    [[nodiscard]] ImageId UpgradeImageUsage(ImageId image_id, BindingType binding);
 
     void GarbageCollectImages();
     void GarbageCollectSamplers();
