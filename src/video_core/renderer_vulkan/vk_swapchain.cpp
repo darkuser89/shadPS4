@@ -215,8 +215,8 @@ void Swapchain::FindPresentMode() {
     if (std::ranges::find(modes, present_mode) == modes.cend()) {
         // FIFO is guaranteed to be supported by the Vulkan spec.
         constexpr auto fallback = vk::PresentModeKHR::eFifo;
-        LOG_WARNING(Render, "Requested present mode {} is not supported, falling back to {}.",
-                    vk::to_string(present_mode), vk::to_string(fallback));
+        LOG_INFO(Render, "Requested present mode {} is not supported, falling back to {}.",
+                 vk::to_string(present_mode), vk::to_string(fallback));
         present_mode = fallback;
     }
 }

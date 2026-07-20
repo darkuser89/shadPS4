@@ -1171,7 +1171,7 @@ int PS4_SYSV_ABI sceUserServiceGetVolumeForSidetone() {
 }
 
 s32 PS4_SYSV_ABI sceUserServiceInitialize(const OrbisUserServiceInitializeParams* initParams) {
-    LOG_WARNING(Lib_UserService, "(dummy) called");
+    LOG_INFO(Lib_UserService, "Initializing user service");
     return ORBIS_OK;
 }
 

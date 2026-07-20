@@ -1471,7 +1471,7 @@ s32 MemoryManager::GetMemoryPoolStats(::Libraries::Kernel::OrbisKernelMemoryPool
 
 void MemoryManager::InvalidateMemory(const VAddr addr, const u64 size) const {
     if (rasterizer) {
-        rasterizer->InvalidateMemory(addr, size);
+        rasterizer->InvalidateMemoryFromHost(addr, size);
     }
 }
 

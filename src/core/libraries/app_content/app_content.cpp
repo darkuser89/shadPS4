@@ -288,7 +288,7 @@ int PS4_SYSV_ABI sceAppContentInitialize(const OrbisAppContentInitParam* initPar
         return ORBIS_APP_CONTENT_ERROR_BUSY;
     }
 
-    LOG_WARNING(Lib_AppContent, "(DUMMY) called");
+    LOG_INFO(Lib_AppContent, "Initializing app content");
     is_initialized = true;
     auto* param_sfo = Common::Singleton<PSF>::Instance();
 

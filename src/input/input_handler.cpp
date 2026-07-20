@@ -449,6 +449,8 @@ void ParseInputConfig(const std::string game_id = "") {
                 SetMouseToJoystick(1);
             } else if (input_string == "right") {
                 SetMouseToJoystick(2);
+            } else if (input_string == "none") {
+                SetMouseToJoystick(0);
             } else {
                 LOG_WARNING(Input, "Invalid argument for mouse-to-joystick binding");
                 SetMouseToJoystick(0);

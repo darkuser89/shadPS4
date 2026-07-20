@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/alignment.h"
 #include "common/debug.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -13,6 +14,10 @@
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
+
+#ifdef __APPLE__
+#include <unistd.h>
+#endif
 
 #ifdef MemoryBarrier
 #undef MemoryBarrier
@@ -1081,6 +1086,33 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size) {
     buffer_cache.InvalidateMemory(addr, size);
     texture_cache.InvalidateMemory(addr, size);
     return true;
+}
+
+bool Rasterizer::InvalidateMemoryFromHost(VAddr addr, u64 size) {
+#ifdef __APPLE__
+    // Apple Silicon applies memory protection at its 16 KiB host-page granularity, while the
+    // GPU caches track PS4 memory in 4 KiB pages. Host code which writes guest memory (for
+    // example, a file read) cannot rely on the page-fault handler: a protected destination makes
+    // the host syscall return EFAULT instead of raising a signal. Conservatively invalidate every
+    // GPU-mapped subrange sharing the destination's host pages, matching the fault handler.
+    if (size == 0 || addr > std::numeric_limits<u64>::max() - size) {
+        return false;
+    }
+    const u64 host_page_size = static_cast<u64>(::getpagesize());
+    const VAddr host_begin = Common::AlignDown(addr, host_page_size);
+    const VAddr host_end = Common::AlignUp(addr + size, host_page_size);
+    boost::container::small_vector<std::pair<VAddr, u64>, 4> mapped_ranges;
+    ForEachMappedRangeInRange(host_begin, host_end - host_begin, [&](const auto& range) {
+        mapped_ranges.emplace_back(range.lower(), range.upper() - range.lower());
+    });
+    for (const auto& [range_begin, range_size] : mapped_ranges) {
+        buffer_cache.InvalidateMemory(range_begin, range_size);
+        texture_cache.InvalidateMemory(range_begin, range_size);
+    }
+    return !mapped_ranges.empty();
+#else
+    return InvalidateMemory(addr, size);
+#endif
 }
 
 bool Rasterizer::ReadMemory(VAddr addr, u64 size) {

@@ -588,7 +588,7 @@ u64 FexBackend::RunGuestThread(VAddr entry_addr, u64 arg, VAddr guest_stack_base
         // Full crime-scene dump: guest GPRs, stack window and code bytes around
         // rip, captured before anything is torn down.
         static constexpr std::array<const char*, 16> GprNames{
-            "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+            "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
             "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
         for (int i = 0; i < 16; ++i) {
             LOG_ERROR(Core_Linker, "  {} = {:#018x}", GprNames[i], state.gregs[i]);

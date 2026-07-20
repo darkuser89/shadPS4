@@ -354,9 +354,11 @@ s32 PS4_SYSV_ABI sceKernelSignalSema(OrbisKernelSema sem, s32 signalCount) {
     }
     const s32 result = implementation->Signal(signalCount);
     if (result == ORBIS_KERNEL_ERROR_EINVAL) {
-        LOG_WARNING(Lib_Kernel,
-                    "sceKernelSignalSema: thread '{}' overflowed sem[{}] (count={}) -> EINVAL",
-                    g_curthread->name, sem, signalCount);
+        // Exceeding maxCount is a normal guest-visible API error. Keep it available for detailed
+        // synchronization diagnosis without flooding ordinary logs when software polls by signal.
+        LOG_TRACE(Lib_Kernel,
+                  "sceKernelSignalSema: thread '{}' overflowed sem[{}] (count={}) -> EINVAL",
+                  g_curthread->name, sem, signalCount);
     }
     return result;
 }

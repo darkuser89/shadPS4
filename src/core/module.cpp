@@ -254,6 +254,13 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
             }
             break;
         }
+        case PT_INTERP:
+        case PT_SCE_MODULE_PARAM:
+        case PT_SCE_COMMENT:
+        case PT_SCE_LIBVERSION:
+            // Informational metadata does not need a runtime mapping.
+            LOG_DEBUG(Core_Linker, "Ignoring metadata segment {}", header_type);
+            break;
         default:
             LOG_ERROR(Core_Linker, "Unimplemented type {}", header_type);
         }
@@ -363,10 +370,6 @@ void Module::LoadDynamicInfo() {
             break;
         case DT_FLAGS:
             dynamic_info.flags = dyn->d_un.d_val;
-            // This value should always be DF_TEXTREL (0x04)
-            if (dynamic_info.flags != 0x04) {
-                LOG_WARNING(Core_Linker, "DT_FLAGS is NOT 0x04 should check!");
-            }
             break;
         case DT_NEEDED:
             // Offset of the library string in the string table to be linked in.
