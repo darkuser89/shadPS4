@@ -409,20 +409,28 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
 
     bool uses_dma = false;
 
+    const auto stages = pipeline->GetStages();
+    size_t num_set_writes{};
+    for (const auto* stage : stages) {
+        if (stage) {
+            num_set_writes += stage->buffers.size() + stage->images.size() + stage->samplers.size();
+        }
+    }
+    set_writes.resize(num_set_writes);
+
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
-    for (const auto* stage : pipeline->GetStages()) {
+    for (const auto* stage : stages) {
         if (!stage) {
             continue;
         }
-        set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
-                          stage->samplers.size());
         stage->PushUd(binding, push_data);
         BindBuffers(*stage, binding, push_data);
         BindTextures(*stage, binding);
         uses_dma |= stage->uses_dma;
     }
+    ASSERT(set_write_index == set_writes.size());
 
     if (uses_dma) {
         // We only use fault buffer for DMA right now.
@@ -689,7 +697,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     // operand.
     // This array holds the size of each consecutive array with the number of bindings consumed.
     // This is currently always 1 for anything other than mip fallback arrays.
-    boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
+    boost::container::static_vector<u32, Shader::NUM_IMAGES> image_descriptor_array_sizes;
 
     for (const auto& image_desc : stage.images) {
         const auto tsharp = image_desc.GetSharp(stage);
