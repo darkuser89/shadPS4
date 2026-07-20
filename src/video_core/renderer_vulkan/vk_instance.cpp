@@ -20,6 +20,11 @@ namespace Vulkan {
 
 namespace {
 
+// Surface format requirements contain both image and buffer capabilities. Vulkan reports those
+// in separate fields; combining the fields can incorrectly claim that an image feature is
+// available merely because the same bit is exposed for buffers.
+constexpr vk::FormatFeatureFlags2 BufferFormatFeatures = vk::FormatFeatureFlagBits2::eVertexBuffer;
+
 std::vector<vk::PhysicalDevice> EnumeratePhysicalDevices(vk::UniqueInstance& instance) {
     auto [devices_result, devices] = instance->enumeratePhysicalDevices();
     ASSERT_MSG(devices_result == vk::Result::eSuccess, "Failed to enumerate physical devices: {}",
@@ -707,7 +712,7 @@ void Instance::CollectImageFormatInfo() {
                         "(vk_format={}, missing features={})",
                         static_cast<u32>(format.data_format),
                         static_cast<u32>(format.number_format), vk::to_string(format.vk_format),
-                        vk::to_string(format.flags & ~GetFormatFeatureFlags(format.vk_format)));
+                        vk::to_string(GetMissingFormatFeatures(format.vk_format, format.flags)));
         }
     }
     for (const auto& format : LiverpoolToVK::DepthFormats()) {
@@ -717,7 +722,7 @@ void Instance::CollectImageFormatInfo() {
                         "(vk_format={}, missing features={})",
                         static_cast<u32>(format.z_format), static_cast<u32>(format.stencil_format),
                         vk::to_string(format.vk_format),
-                        vk::to_string(format.flags & ~GetFormatFeatureFlags(format.vk_format)));
+                        vk::to_string(GetMissingFormatFeatures(format.vk_format, format.flags)));
         }
     }
 }
@@ -755,13 +760,17 @@ u64 Instance::GetDeviceMemoryUsage() const {
     return total_usage;
 }
 
-vk::FormatFeatureFlags2 Instance::GetFormatFeatureFlags(vk::Format format) const {
+vk::FormatFeatureFlags2 Instance::GetMissingFormatFeatures(
+    const vk::Format format, const vk::FormatFeatureFlags2 requested) const {
     const auto it = format_properties.find(format);
     if (it == format_properties.end()) {
         UNIMPLEMENTED_MSG("Properties of format {} have not been queried.", vk::to_string(format));
     }
 
-    return it->second.optimalTilingFeatures | it->second.bufferFeatures;
+    const vk::FormatFeatureFlags2 required_buffer = requested & BufferFormatFeatures;
+    const vk::FormatFeatureFlags2 required_image = requested & ~BufferFormatFeatures;
+    return (required_buffer & ~it->second.bufferFeatures) |
+           (required_image & ~it->second.optimalTilingFeatures);
 }
 
 bool Instance::IsFormatSupported(const vk::Format format,
@@ -769,7 +778,7 @@ bool Instance::IsFormatSupported(const vk::Format format,
     if (format == vk::Format::eUndefined) [[unlikely]] {
         return true;
     }
-    return (GetFormatFeatureFlags(format) & flags) == flags;
+    return !GetMissingFormatFeatures(format, flags);
 }
 
 vk::Format Instance::GetSupportedFormat(const vk::Format format,

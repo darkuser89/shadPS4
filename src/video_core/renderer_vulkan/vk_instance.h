@@ -465,8 +465,9 @@ private:
     void CollectImageFormatInfo();
     void CollectToolingInfo() const;
 
-    /// Gets the supported feature flags for a format.
-    [[nodiscard]] vk::FormatFeatureFlags2 GetFormatFeatureFlags(vk::Format format) const;
+    /// Gets the feature flags requested by the guest but missing from the matching Vulkan domain.
+    [[nodiscard]] vk::FormatFeatureFlags2 GetMissingFormatFeatures(
+        vk::Format format, vk::FormatFeatureFlags2 requested) const;
 
 private:
     vk::UniqueInstance instance;

@@ -12,6 +12,31 @@
 
 namespace VideoCore {
 
+namespace {
+
+vk::FormatFeatureFlags2 ViewFormatFeatures(vk::ImageUsageFlags usage, bool storage_without_format) {
+    vk::FormatFeatureFlags2 features{};
+    if (usage & vk::ImageUsageFlagBits::eSampled) {
+        features |= vk::FormatFeatureFlagBits2::eSampledImage;
+    }
+    if (usage & vk::ImageUsageFlagBits::eStorage) {
+        features |= vk::FormatFeatureFlagBits2::eStorageImage;
+        if (storage_without_format) {
+            features |= vk::FormatFeatureFlagBits2::eStorageReadWithoutFormat |
+                        vk::FormatFeatureFlagBits2::eStorageWriteWithoutFormat;
+        }
+    }
+    if (usage & vk::ImageUsageFlagBits::eColorAttachment) {
+        features |= vk::FormatFeatureFlagBits2::eColorAttachment;
+    }
+    if (usage & vk::ImageUsageFlagBits::eDepthStencilAttachment) {
+        features |= vk::FormatFeatureFlagBits2::eDepthStencilAttachment;
+    }
+    return features;
+}
+
+} // Anonymous namespace
+
 vk::ImageViewType ConvertImageViewType(AmdGpu::ImageType type) {
     switch (type) {
     case AmdGpu::ImageType::Color1D:
@@ -49,6 +74,7 @@ bool IsViewTypeCompatible(AmdGpu::ImageType view_type, AmdGpu::ImageType image_t
 
 ImageViewInfo::ImageViewInfo(const AmdGpu::Image& image, const Shader::ImageResource& desc) noexcept
     : is_storage{desc.is_written} {
+    usage = is_storage ? vk::ImageUsageFlagBits::eStorage : vk::ImageUsageFlagBits::eSampled;
     const auto dfmt = image.GetDataFmt();
     auto nfmt = image.GetNumberFmt();
     if (is_storage && nfmt == AmdGpu::NumberFormat::Srgb) {
@@ -71,6 +97,7 @@ ImageViewInfo::ImageViewInfo(const AmdGpu::Image& image, const Shader::ImageReso
 }
 
 ImageViewInfo::ImageViewInfo(const AmdGpu::ColorBuffer& col_buffer) noexcept {
+    usage = vk::ImageUsageFlagBits::eColorAttachment;
     range.base.layer = col_buffer.BaseSlice();
     range.extent.layers = col_buffer.NumSlices() - range.base.layer;
     type = range.extent.layers > 1 ? AmdGpu::ImageType::Color2DArray : AmdGpu::ImageType::Color2D;
@@ -80,6 +107,7 @@ ImageViewInfo::ImageViewInfo(const AmdGpu::ColorBuffer& col_buffer) noexcept {
 
 ImageViewInfo::ImageViewInfo(const AmdGpu::DepthBuffer& depth_buffer, AmdGpu::DepthView view,
                              AmdGpu::DepthControl ctl) {
+    usage = vk::ImageUsageFlagBits::eDepthStencilAttachment;
     format = Vulkan::LiverpoolToVK::DepthFormat(depth_buffer.z_info.format,
                                                 depth_buffer.stencil_info.format);
     is_storage = ctl.depth_write_enable;
@@ -91,10 +119,10 @@ ImageViewInfo::ImageViewInfo(const AmdGpu::DepthBuffer& depth_buffer, AmdGpu::De
 ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info_,
                      const Image& image)
     : info{info_} {
-    vk::ImageViewUsageCreateInfo usage_ci{.usage = image.usage_flags};
-    if (!info.is_storage) {
-        usage_ci.usage &= ~vk::ImageUsageFlagBits::eStorage;
-    }
+    ASSERT_MSG((info.usage & image.usage_flags) == info.usage,
+               "Image view usage {} is not available on backing image usage {}",
+               vk::to_string(info.usage), vk::to_string(image.usage_flags));
+    vk::ImageViewUsageCreateInfo usage_ci{.usage = info.usage};
     // When sampling D32/D16 texture from shader, the T# specifies R32/R16 format so adjust it.
     vk::Format format = info.format;
     vk::ImageAspectFlags aspect = image.aspect_mask;
@@ -109,11 +137,12 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
         aspect = vk::ImageAspectFlagBits::eStencil;
     }
 
+    const auto required_features = ViewFormatFeatures(info.usage, info.is_storage);
     const vk::ImageViewCreateInfo image_view_ci = {
         .pNext = &usage_ci,
         .image = image.GetImage(),
         .viewType = ConvertImageViewType(info.type),
-        .format = instance.GetSupportedFormat(format, image.format_features),
+        .format = instance.GetSupportedFormat(format, required_features),
         .components = info.mapping,
         .subresourceRange{
             .aspectMask = aspect,
