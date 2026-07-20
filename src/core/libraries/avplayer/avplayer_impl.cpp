@@ -5,6 +5,7 @@
 #include "core/libraries/avplayer/avplayer_common.h"
 #include "core/libraries/avplayer/avplayer_error.h"
 #include "core/libraries/avplayer/avplayer_impl.h"
+#include "core/memory.h"
 
 namespace Libraries::AvPlayer {
 
@@ -74,6 +75,8 @@ u64 PS4_SYSV_ABI AvPlayer::SizeFile(void* handle) {
 
 AvPlayerInitData AvPlayer::StubInitData(const AvPlayerInitData& data) {
     AvPlayerInitData result = data;
+    result.default_language =
+        Core::Memory::Instance()->TranslateGuestPointer(result.default_language);
     result.memory_replacement.object_ptr = this;
     result.memory_replacement.allocate = &AvPlayer::Allocate;
     result.memory_replacement.deallocate = &AvPlayer::Deallocate;

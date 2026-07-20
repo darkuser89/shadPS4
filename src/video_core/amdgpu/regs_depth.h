@@ -5,6 +5,7 @@
 
 #include "common/assert.h"
 #include "common/types.h"
+#include "video_core/amdgpu/guest_address.h"
 #include "video_core/amdgpu/tiling.h"
 
 namespace AmdGpu {
@@ -249,19 +250,19 @@ struct DepthBuffer {
     }
 
     u64 DepthAddress() const {
-        return u64(z_read_base) << 8;
+        return ResolveGuestAddress(u64(z_read_base) << 8);
     }
 
     u64 StencilAddress() const {
-        return u64(stencil_read_base) << 8;
+        return ResolveGuestAddress(u64(stencil_read_base) << 8);
     }
 
     u64 DepthWriteAddress() const {
-        return u64(z_write_base) << 8;
+        return ResolveGuestAddress(u64(z_write_base) << 8);
     }
 
     u64 StencilWriteAddress() const {
-        return u64(stencil_write_base) << 8;
+        return ResolveGuestAddress(u64(stencil_write_base) << 8);
     }
 
     u32 NumSamples() const {

@@ -277,13 +277,15 @@ struct PM4CmdStrmoutBufferUpdate {
     template <typename T = u64>
     T DstAddress() const {
         ASSERT(update_memory.Value() == 1);
-        return reinterpret_cast<T>(dst_address_lo.Value() | u64(dst_address_hi & 0xFFFF) << 32);
+        const VAddr guest_address = dst_address_lo.Value() | u64(dst_address_hi & 0xFFFF) << 32;
+        return ResolveGuestAddressAs<T>(guest_address);
     }
 
     template <typename T = u64>
     T SrcAddress() const {
         ASSERT(source_select.Value() == SourceSelect::SrcAddress);
-        return reinterpret_cast<T>(src_address_lo.Value() | u64(src_address_hi & 0xFFFF) << 32);
+        const VAddr guest_address = src_address_lo.Value() | u64(src_address_hi & 0xFFFF) << 32;
+        return ResolveGuestAddressAs<T>(guest_address);
     }
 };
 
@@ -432,7 +434,7 @@ struct PM4CmdEventWrite {
     T Address() const {
         ASSERT(event_index.Value() >= EventIndex::ZpassDone &&
                event_index.Value() <= EventIndex::SampleStreamoutStatSx);
-        return std::bit_cast<T>((u64(address[1]) << 32u) | u64(address[0]));
+        return ResolveGuestAddressAs<T>((u64(address[1]) << 32u) | u64(address[0]));
     }
 };
 
@@ -455,7 +457,7 @@ struct PM4CmdEventWriteEop {
 
     template <typename T>
     T* Address() const {
-        return reinterpret_cast<T*>(address_lo | u64(address_hi) << 32);
+        return ResolveGuestAddressAs<T*>(address_lo | u64(address_hi) << 32);
     }
 
     u32 DataDWord() const {
@@ -560,12 +562,12 @@ struct PM4DmaData {
 
     template <typename T>
     T SrcAddress() const {
-        return std::bit_cast<T>(src_addr_lo | u64(src_addr_hi) << 32);
+        return ResolveGuestAddressAs<T>(src_addr_lo | u64(src_addr_hi) << 32);
     }
 
     template <typename T>
     T DstAddress() const {
-        return std::bit_cast<T>(dst_addr_lo | u64(dst_addr_hi) << 32);
+        return ResolveGuestAddressAs<T>(dst_addr_lo | u64(dst_addr_hi) << 32);
     }
 
     u32 NumBytes() const noexcept {
@@ -619,12 +621,12 @@ struct PM4CmdCopyData {
 
     template <typename T>
     T SrcAddress() const {
-        return std::bit_cast<T>(src_addr_lo | u64(src_addr_hi) << 32);
+        return ResolveGuestAddressAs<T>(src_addr_lo | u64(src_addr_hi) << 32);
     }
 
     template <typename T>
     T DstAddress() const {
-        return std::bit_cast<T>(dst_addr_lo | u64(dst_addr_hi) << 32);
+        return ResolveGuestAddressAs<T>(dst_addr_lo | u64(dst_addr_hi) << 32);
     }
 };
 
@@ -675,7 +677,7 @@ struct PM4CmdWaitRegMem {
 
     template <typename T = u32*>
     T Address() const {
-        return std::bit_cast<T>((uintptr_t(poll_addr_hi) << 32) | (poll_addr_lo << 2));
+        return ResolveGuestAddressAs<T>((uintptr_t(poll_addr_hi) << 32) | (poll_addr_lo << 2));
     }
 
     u32 Reg() const {
@@ -683,10 +685,8 @@ struct PM4CmdWaitRegMem {
     }
 
     bool Test(std::span<const u32> regs) const {
-        const VAddr guest_address = std::bit_cast<VAddr>(Address());
-        const u32 value = mem_space.Value() == MemSpace::Memory
-                              ? *ResolveGuestAddressAs<const u32*>(guest_address)
-                              : regs[Reg()];
+        const u32 value =
+            mem_space.Value() == MemSpace::Memory ? *Address<const u32*>() : regs[Reg()];
         switch (function.Value()) {
         case Function::Always: {
             return true;
@@ -747,7 +747,7 @@ struct PM4CmdWriteData {
 
     template <typename T>
     T Address() const {
-        return reinterpret_cast<T>(addr64);
+        return ResolveGuestAddressAs<T>(addr64);
     }
 };
 
@@ -778,7 +778,7 @@ struct PM4CmdEventWriteEos {
 
     template <typename T = u32*>
     T Address() const {
-        return reinterpret_cast<T>(address_lo | u64(address_hi) << 32);
+        return ResolveGuestAddressAs<T>(address_lo | u64(address_hi) << 32);
     }
 
     u32 DataDWord() const {
@@ -837,7 +837,7 @@ struct PM4DumpConstRam {
 
     template <typename T>
     T Address() const {
-        return reinterpret_cast<T>((u64(addr_hi) << 32u) | addr_lo);
+        return ResolveGuestAddressAs<T>((u64(addr_hi) << 32u) | addr_lo);
     }
 
     [[nodiscard]] u32 Offset() const {
@@ -889,7 +889,7 @@ struct PM4CmdIndirectBuffer {
 
     template <typename T>
     T* Address() const {
-        return reinterpret_cast<T*>((u64(ibase_hi) << 32u) | ibase_lo);
+        return ResolveGuestAddressAs<T*>((u64(ibase_hi) << 32u) | ibase_lo);
     }
 };
 
@@ -927,7 +927,7 @@ struct PM4CmdReleaseMem {
     template <typename T>
     T Address() const {
         u64 full_address = address_lo | (u64(address_hi) << 32);
-        return std::bit_cast<T>(full_address);
+        return ResolveGuestAddressAs<T>(full_address);
     }
 
     u32 DataDWord() const {
@@ -1006,7 +1006,7 @@ struct PM4CmdSetBase {
     T Address() const {
         ASSERT(base_index == BaseIndex::DisplayListPatchTable ||
                base_index == BaseIndex::DrawIndexIndirPatchTable);
-        return reinterpret_cast<T>(address0 | (u64(address1 & 0xffff) << 32u));
+        return ResolveGuestAddressAs<T>(address0 | (u64(address1 & 0xffff) << 32u));
     }
 };
 
@@ -1030,7 +1030,7 @@ struct PM4CmdDispatchIndirectMec {
 
     template <typename T>
     T Address() const {
-        return std::bit_cast<T>(address0 | (u64(address1 & 0xffff) << 32u));
+        return ResolveGuestAddressAs<T>(address0 | (u64(address1 & 0xffff) << 32u));
     }
 };
 
@@ -1177,7 +1177,7 @@ struct PM4CmdMemSemaphore {
 
     template <typename T>
     [[nodiscard]] T Address() const {
-        return std::bit_cast<T>(u64(addr_lo) << 3 | (u64(addr_hi) << 32));
+        return ResolveGuestAddressAs<T>(u64(addr_lo) << 3 | (u64(addr_hi) << 32));
     }
 
     [[nodiscard]] bool IsSignaling() const {
@@ -1223,8 +1223,8 @@ struct PM4CmdCondExec {
     };
 
     bool* Address() const {
-        return std::bit_cast<bool*>(u64(bool_addr_hi.Value()) << 32 | u64(bool_addr_lo.Value())
-                                                                          << 2);
+        return ResolveGuestAddressAs<bool*>(u64(bool_addr_hi.Value()) << 32 |
+                                            u64(bool_addr_lo.Value()) << 2);
     }
 };
 

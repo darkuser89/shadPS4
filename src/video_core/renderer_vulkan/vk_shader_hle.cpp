@@ -18,9 +18,12 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
     auto& buffer_cache = rasterizer.GetBufferCache();
 
     // Copy shader defines three formatted buffers as inputs: control, source, and destination.
-    const auto ctl_buf_sharp = info.buffers[0].GetSharp(info);
-    const auto src_buf_sharp = info.buffers[1].GetSharp(info);
-    const auto dst_buf_sharp = info.buffers[2].GetSharp(info);
+    auto ctl_buf_sharp = info.buffers[0].GetSharp(info);
+    auto src_buf_sharp = info.buffers[1].GetSharp(info);
+    auto dst_buf_sharp = info.buffers[2].GetSharp(info);
+    ctl_buf_sharp.base_address = ctl_buf_sharp.Address();
+    src_buf_sharp.base_address = src_buf_sharp.Address();
+    dst_buf_sharp.base_address = dst_buf_sharp.Address();
     const auto buf_stride = src_buf_sharp.GetStride();
     ASSERT(buf_stride == dst_buf_sharp.GetStride());
 

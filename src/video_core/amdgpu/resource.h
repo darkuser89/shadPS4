@@ -6,6 +6,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/bit_field.h"
+#include "video_core/amdgpu/guest_address.h"
 #include "video_core/amdgpu/pixel_format.h"
 #include "video_core/amdgpu/tiling.h"
 
@@ -98,6 +99,10 @@ struct Buffer {
     u32 GetElementSize() const noexcept {
         // Element size is 2 bits, meaning 2, 4, 8, or 16.
         return 2 << element_size;
+    }
+
+    VAddr Address() const {
+        return ResolveGuestAddress(base_address);
     }
 };
 static_assert(sizeof(Buffer) == 16); // 128bits
@@ -200,7 +205,7 @@ struct Image {
     }
 
     VAddr Address() const {
-        return base_address << 8;
+        return ResolveGuestAddress(base_address << 8);
     }
 
     operator bool() const noexcept {

@@ -6,6 +6,7 @@
 #include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
+#include "video_core/amdgpu/guest_address.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -462,7 +463,7 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
 
     // Assume if a shader reads metadata, it is a copy shader.
     for (const auto& desc : info.buffers) {
-        const VAddr address = desc.GetSharp(info).base_address;
+        const VAddr address = desc.GetSharp(info).Address();
         if (!desc.IsSpecial() && !desc.is_written && texture_cache.IsMeta(address)) {
             return false;
         }
@@ -475,7 +476,7 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
     if (!info.has_bitwise_xor) {
         // Assume if a shader writes metadata without address calculation, it is a clear shader.
         for (const auto& desc : info.buffers) {
-            const VAddr address = desc.GetSharp(info).base_address;
+            const VAddr address = desc.GetSharp(info).Address();
             if (!desc.IsSpecial() && desc.is_written && texture_cache.ClearMeta(address)) {
                 // Assume all slices were updates
                 LOG_TRACE(Render_Vulkan, "Metadata update skipped");
@@ -508,17 +509,18 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     // Buffers must have the same size and each thread of the dispatch must copy 1 dword of data
     const AmdGpu::Buffer buf0 = desc0.GetSharp(info);
     const AmdGpu::Buffer buf1 = desc1.GetSharp(info);
+    const VAddr buf0_address = buf0.Address();
+    const VAddr buf1_address = buf1.Address();
     if (buf0.GetSize() != buf1.GetSize() || cs_pgm.dim_x != (buf0.GetSize() / 256)) {
         return false;
     }
 
     // Find images the buffer alias
-    const auto image0_id = texture_cache.FindImageFromRange(buf0.base_address, buf0.GetSize());
+    const auto image0_id = texture_cache.FindImageFromRange(buf0_address, buf0.GetSize());
     if (!image0_id) {
         return false;
     }
-    const auto image1_id =
-        texture_cache.FindImageFromRange(buf1.base_address, buf1.GetSize(), false);
+    const auto image1_id = texture_cache.FindImageFromRange(buf1_address, buf1.GetSize(), false);
     if (!image1_id) {
         return false;
     }
@@ -570,14 +572,15 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     // First buffer must have size of vec4 and second the size of a single layer
     const AmdGpu::Buffer buf0 = desc0.GetSharp(info);
     const AmdGpu::Buffer buf1 = desc1.GetSharp(info);
+    const VAddr buf0_address = buf0.Address();
+    const VAddr buf1_address = buf1.Address();
     const u32 buf1_bpp = AmdGpu::NumBitsPerBlock(buf1.GetDataFmt());
     if (buf0.GetSize() != 16 || (cs_pgm.dim_x * 128ULL * (buf1_bpp / 8)) != buf1.GetSize()) {
         return false;
     }
 
     // Find image the buffer alias
-    const auto image1_id =
-        texture_cache.FindImageFromRange(buf1.base_address, buf1.GetSize(), false);
+    const auto image1_id = texture_cache.FindImageFromRange(buf1_address, buf1.GetSize(), false);
     if (!image1_id) {
         return false;
     }
@@ -590,7 +593,7 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     }
 
     // Perform image clear
-    const float* values = reinterpret_cast<float*>(buf0.base_address);
+    const float* values = reinterpret_cast<float*>(buf0_address);
     const vk::ClearValue clear = {
         .color = {.float32 = std::array<float, 4>{values[0], values[1], values[2], values[3]}},
     };
@@ -613,7 +616,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     buffer_bindings.clear();
 
     for (const auto& desc : stage.buffers) {
-        const auto vsharp = desc.GetSharp(stage);
+        auto vsharp = desc.GetSharp(stage);
+        if (!desc.IsSpecial()) {
+            vsharp.base_address = vsharp.Address();
+        }
         // Hardening: the PS4 GPU only addresses 40 bits. A V# base address
         // outside this range is guaranteed to be garbage (e.g. from an
         // uninitialized descriptor). Do not forward such resources to the
@@ -1064,10 +1070,19 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
 }
 
 void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {
+    if (!is_gds) {
+        address = AmdGpu::ResolveGuestAddress(address);
+    }
     buffer_cache.FillBuffer(address, num_bytes, value, is_gds);
 }
 
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
+    if (!dst_gds) {
+        dst = AmdGpu::ResolveGuestAddress(dst);
+    }
+    if (!src_gds) {
+        src = AmdGpu::ResolveGuestAddress(src);
+    }
     buffer_cache.CopyBuffer(dst, src, num_bytes, dst_gds, src_gds);
 }
 

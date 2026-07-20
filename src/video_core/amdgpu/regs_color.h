@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "video_core/amdgpu/guest_address.h"
 #include "video_core/amdgpu/pixel_format.h"
 #include "video_core/amdgpu/tiling.h"
 
@@ -208,15 +209,17 @@ struct ColorBuffer {
     }
 
     u64 Address() const {
-        return u64(base_address) << 8 | (info.linear_general ? (view.slice_start & 0xff) : 0);
+        const VAddr guest_address =
+            u64(base_address) << 8 | (info.linear_general ? (view.slice_start & 0xff) : 0);
+        return ResolveGuestAddress(guest_address);
     }
 
     VAddr CmaskAddress() const {
-        return VAddr(cmask_base_address) << 8;
+        return ResolveGuestAddress(VAddr(cmask_base_address) << 8);
     }
 
     VAddr FmaskAddress() const {
-        return VAddr(fmask_base_address) << 8;
+        return ResolveGuestAddress(VAddr(fmask_base_address) << 8);
     }
 
     u32 NumSamples() const {

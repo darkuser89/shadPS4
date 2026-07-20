@@ -175,7 +175,8 @@ void BufferCache::BindVertexBuffers(
     Vulkan::VertexInputs<BufferRange> ranges{};
     for (const auto& buffer : guest_buffers) {
         if (buffer.GetSize() > 0) {
-            ranges.emplace_back(buffer.base_address, buffer.base_address + buffer.GetSize());
+            const VAddr address = buffer.Address();
+            ranges.emplace_back(address, address + buffer.GetSize());
         }
     }
 
@@ -218,14 +219,14 @@ void BufferCache::BindVertexBuffers(
     Vulkan::VertexInputs<vk::DeviceSize> host_strides;
     for (const auto& buffer : guest_buffers) {
         if (buffer.GetSize() > 0) {
+            const VAddr address = buffer.Address();
             const auto host_buffer_info =
                 std::ranges::find_if(ranges_merged, [&](const BufferRange& range) {
-                    return buffer.base_address >= range.base_address &&
-                           buffer.base_address < range.end_address;
+                    return address >= range.base_address && address < range.end_address;
                 });
             ASSERT(host_buffer_info != ranges_merged.cend());
             host_buffers.emplace_back(host_buffer_info->vk_buffer);
-            host_offsets.push_back(host_buffer_info->offset + buffer.base_address -
+            host_offsets.push_back(host_buffer_info->offset + address -
                                    host_buffer_info->base_address);
         } else {
             host_buffers.emplace_back(VK_NULL_HANDLE);

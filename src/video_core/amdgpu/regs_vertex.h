@@ -5,6 +5,7 @@
 
 #include "common/assert.h"
 #include "common/types.h"
+#include "video_core/amdgpu/guest_address.h"
 
 namespace AmdGpu {
 
@@ -34,7 +35,8 @@ struct IndexBufferBase {
 
     template <typename T = VAddr>
     T Address() const {
-        return std::bit_cast<T>((base_addr_lo & ~1U) | u64(base_addr_hi) << 32);
+        const VAddr guest_address = (base_addr_lo & ~1U) | u64(base_addr_hi) << 32;
+        return ResolveGuestAddressAs<T>(guest_address);
     }
 };
 
@@ -78,7 +80,7 @@ struct Address {
     u32 address;
 
     VAddr GetAddress() const {
-        return u64(address) << 8;
+        return ResolveGuestAddress(u64(address) << 8);
     }
 };
 

@@ -5,6 +5,7 @@
 
 #include <bit>
 #include "common/types.h"
+#include "video_core/amdgpu/guest_address.h"
 
 namespace AmdGpu {
 
@@ -13,7 +14,7 @@ struct BorderColorBuffer {
 
     template <typename T = VAddr>
     const T Address() const {
-        return std::bit_cast<T>(base_addr << 8);
+        return ResolveGuestAddressAs<T>(base_addr << 8);
     }
 };
 

@@ -6,6 +6,7 @@
 #include "core/libraries/avplayer/avplayer_error.h"
 #include "core/libraries/avplayer/avplayer_impl.h"
 #include "core/libraries/libs.h"
+#include "core/memory.h"
 
 #include <string_view>
 
@@ -25,7 +26,9 @@ s32 PS4_SYSV_ABI sceAvPlayerAddSourceEx(AvPlayerHandle handle, AvPlayerUriType u
     if (handle == nullptr || uri_type != AvPlayerUriType::Source || source_details == nullptr) {
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS;
     }
-    const auto path = std::string_view(source_details->uri.name, source_details->uri.length);
+    const auto* uri_name =
+        Core::Memory::Instance()->TranslateGuestPointer(source_details->uri.name);
+    const auto path = std::string_view(uri_name, source_details->uri.length);
     return handle->AddSourceEx(path, source_details->source_type);
 }
 
@@ -72,7 +75,11 @@ bool PS4_SYSV_ABI sceAvPlayerGetAudioData(AvPlayerHandle handle, AvPlayerFrameIn
     if (handle == nullptr || p_info == nullptr) {
         return false;
     }
-    return handle->GetAudioData(*p_info);
+    if (!handle->GetAudioData(*p_info)) {
+        return false;
+    }
+    p_info->p_data = Core::Memory::Instance()->CanonicalizeGuestPointer(p_info->p_data);
+    return true;
 }
 
 s32 PS4_SYSV_ABI sceAvPlayerGetStreamInfo(AvPlayerHandle handle, u32 stream_id,
@@ -89,7 +96,11 @@ bool PS4_SYSV_ABI sceAvPlayerGetVideoData(AvPlayerHandle handle, AvPlayerFrameIn
     if (handle == nullptr || video_info == nullptr) {
         return false;
     }
-    return handle->GetVideoData(*video_info);
+    if (!handle->GetVideoData(*video_info)) {
+        return false;
+    }
+    video_info->p_data = Core::Memory::Instance()->CanonicalizeGuestPointer(video_info->p_data);
+    return true;
 }
 
 bool PS4_SYSV_ABI sceAvPlayerGetVideoDataEx(AvPlayerHandle handle,
@@ -98,7 +109,11 @@ bool PS4_SYSV_ABI sceAvPlayerGetVideoDataEx(AvPlayerHandle handle,
     if (handle == nullptr || video_info == nullptr) {
         return false;
     }
-    return handle->GetVideoData(*video_info);
+    if (!handle->GetVideoData(*video_info)) {
+        return false;
+    }
+    video_info->p_data = Core::Memory::Instance()->CanonicalizeGuestPointer(video_info->p_data);
+    return true;
 }
 
 AvPlayerHandle PS4_SYSV_ABI sceAvPlayerInit(AvPlayerInitData* data) {

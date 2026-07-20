@@ -275,9 +275,20 @@ public:
     // Public because the FEX fault handler emulates carveout accesses through it.
     VAddr TranslateCanonicalGuestAddress(VAddr virtual_addr);
 
+    template <typename T>
+    T* TranslateGuestPointer(T* guest_ptr) {
+        return reinterpret_cast<T*>(
+            TranslateCanonicalGuestAddress(reinterpret_cast<VAddr>(guest_ptr)));
+    }
+
     // Converts an address in the relocated ARM64 mapping back to the canonical
     // address observed by PS4 code. Identity on hosts without relocation.
     VAddr CanonicalizeGuestAddress(VAddr virtual_addr);
+
+    template <typename T>
+    T* CanonicalizeGuestPointer(T* host_ptr) {
+        return reinterpret_cast<T*>(CanonicalizeGuestAddress(reinterpret_cast<VAddr>(host_ptr)));
+    }
 
     // Host base dedicated to the canonical carveout above. It is deliberately kept separate
     // from identity-mapped high PS4 addresses such as Unreal Engine memory pools.

@@ -829,9 +829,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::IndirectBuffer: {
                 const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-                const auto guest_address =
-                    std::bit_cast<VAddr>(indirect_buffer->Address<const u32>());
-                const auto* commands = ResolveGuestAddressAs<const u32*>(guest_address);
+                const auto* commands = indirect_buffer->Address<const u32>();
                 auto task = ProcessGraphics({commands, indirect_buffer->ib_size}, {});
                 RESUME_GFX(task);
 
@@ -969,9 +967,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::IndirectBuffer: {
             const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-            const auto guest_address =
-                std::bit_cast<VAddr>(indirect_buffer->Address<const u32>());
-            const auto* commands = ResolveGuestAddressAs<const u32*>(guest_address);
+            const auto* commands = indirect_buffer->Address<const u32>();
             auto task = ProcessCompute<true>({commands, indirect_buffer->ib_size}, vqid);
             RESUME_ASC(task, vqid);
 
