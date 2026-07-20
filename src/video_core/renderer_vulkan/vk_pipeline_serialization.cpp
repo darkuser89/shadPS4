@@ -342,17 +342,23 @@ bool PipelineCache::LoadPipelineStage(size_t stage, u64 permutation_hash) {
         }
     }
 
-    // Only touch the SPIR-V file when this shader permutation has not already been restored by a
-    // different pipeline. Titles commonly share the same stages across hundreds of pipeline keys.
-    std::vector<u32> spv{};
-    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx),
-                                       spv);
-    if (spv.empty()) {
-        return false;
+    // KosmicKrisp translates SPIR-V further when a pipeline is created. Keep the serialized
+    // specialization available, but defer even the VkShaderModule creation until a draw actually
+    // uses it. This avoids restoring every historical shader at startup together with pipelines
+    // that are already created on demand on this driver.
+    vk::ShaderModule module{};
+    if (!DeferShaderModuleCreationDuringWarmup()) {
+        // Only touch the SPIR-V file when this shader permutation has not already been restored by
+        // a different pipeline. Titles commonly share stages across hundreds of pipeline keys.
+        std::vector<u32> spv;
+        Storage::DataBase::Instance().Load(
+            Storage::BlobType::ShaderBinary,
+            fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx), spv);
+        if (spv.empty()) {
+            return false;
+        }
+        module = CompileSPV(spv, instance.GetDevice());
     }
-
-    const vk::ShaderModule module = CompileSPV(spv, instance.GetDevice());
     if (cached_program == nullptr) {
         const auto [it_pgm, new_program] = program_cache.try_emplace(program->info.pgm_hash);
         ASSERT(new_program);
