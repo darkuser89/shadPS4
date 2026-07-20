@@ -327,22 +327,6 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
 
 PipelineCache::~PipelineCache() = default;
 
-bool PipelineCache::DeferPipelineCreationDuringWarmup() const {
-    // KosmicKrisp translates Vulkan pipelines through NIR to Metal. Recreating every serialized
-    // pipeline before the first frame front-loads that translation even when a title does not use
-    // most of its historical cache during the current session. Shader modules are still restored
-    // during warmup; the comparatively expensive VkPipeline objects are created on first use.
-    return instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp;
-}
-
-bool PipelineCache::DeferShaderModuleCreationDuringWarmup() const {
-    // Lazy restoration performs cache reads during rendering. Directory-backed caches support
-    // that directly, whereas miniz changes the archive from reader to writer mode after warmup
-    // and services writes on another thread. Keep archive-backed shader restoration eager to
-    // avoid concurrent access to the same archive object.
-    return DeferPipelineCreationDuringWarmup() && !EmulatorSettings.IsPipelineCacheArchived();
-}
-
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
     if (!RefreshGraphicsKey()) {
         return nullptr;
@@ -675,33 +659,6 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     return module;
 }
 
-vk::ShaderModule PipelineCache::RestoreModule(Program& program, size_t perm_idx,
-                                              const std::span<const u32>& code) {
-    auto& info = program.info;
-    std::vector<u32> spv;
-    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", info.pgm_hash, perm_idx), spv);
-    if (spv.empty()) {
-        return {};
-    }
-
-    std::optional<std::vector<u32>> patch;
-    if (EmulatorSettings.IsPatchShaders()) {
-        patch = GetShaderPatch(info.pgm_hash, info.stage, perm_idx, "spv");
-    }
-    const bool is_patched = patch.has_value();
-    const auto module =
-        CompileSPV(is_patched ? std::span<const u32>{*patch} : std::span<const u32>{spv},
-                   instance.GetDevice());
-    const auto name = GetShaderName(info.stage, info.pgm_hash, perm_idx);
-    Vulkan::SetObjectName(instance.GetDevice(), module, name);
-    if (EmulatorSettings.IsShaderCollect()) {
-        DebugState.CollectShader(name, info.l_stage, module, spv, code,
-                                 patch ? *patch : std::span<const u32>{}, is_patched);
-    }
-    return module;
-}
-
 PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stage,
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
@@ -741,25 +698,10 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
         program->AddPermut(module, std::move(spec));
     } else {
+        info.AddBindings(binding);
+        module = it->module;
         perm_idx = std::distance(program->modules.begin(), it);
         perm_hash = HashCombine(params.hash, perm_idx);
-        module = it->module;
-        if (!module) {
-            module = RestoreModule(*program, perm_idx, params.code);
-            if (module) {
-                it->module = module;
-                info.AddBindings(binding);
-            } else {
-                // A pipeline-key entry can outlive its SPIR-V file after an interrupted cache
-                // write. Recompile this one permutation from guest code and repair the cache.
-                auto new_info = Shader::Info(stage, l_stage, params);
-                module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
-                it->module = module;
-                RegisterShaderMeta(info, it->spec.fetch_shader_data, it->spec, perm_hash, perm_idx);
-            }
-        } else {
-            info.AddBindings(binding);
-        }
     }
     return std::make_tuple(&program->info, module,
                            program->modules[perm_idx].spec.fetch_shader_data, perm_hash);

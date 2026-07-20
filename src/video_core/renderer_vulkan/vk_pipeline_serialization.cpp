@@ -183,13 +183,6 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
         return false;
     }
 
-    if (DeferPipelineCreationDuringWarmup()) {
-        // Preserve the key as a null placeholder. First use creates the VkPipeline without
-        // serializing the already known key a second time.
-        compute_pipelines.try_emplace(compute_key);
-        return true;
-    }
-
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     ASSERT(is_new);
 
@@ -268,11 +261,6 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
         }
     }
 
-    if (DeferPipelineCreationDuringWarmup()) {
-        graphics_pipelines.try_emplace(graphics_key);
-        return true;
-    }
-
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     ASSERT(is_new);
 
@@ -342,23 +330,16 @@ bool PipelineCache::LoadPipelineStage(size_t stage, u64 permutation_hash) {
         }
     }
 
-    // KosmicKrisp translates SPIR-V further when a pipeline is created. Keep the serialized
-    // specialization available, but defer even the VkShaderModule creation until a draw actually
-    // uses it. This avoids restoring every historical shader at startup together with pipelines
-    // that are already created on demand on this driver.
-    vk::ShaderModule module{};
-    if (!DeferShaderModuleCreationDuringWarmup()) {
-        // Only touch the SPIR-V file when this shader permutation has not already been restored by
-        // a different pipeline. Titles commonly share stages across hundreds of pipeline keys.
-        std::vector<u32> spv;
-        Storage::DataBase::Instance().Load(
-            Storage::BlobType::ShaderBinary,
-            fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx), spv);
-        if (spv.empty()) {
-            return false;
-        }
-        module = CompileSPV(spv, instance.GetDevice());
+    // Only touch the SPIR-V file when this shader permutation has not already been restored by a
+    // different pipeline. Titles commonly share the same stages across hundreds of pipeline keys.
+    std::vector<u32> spv;
+    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
+                                       fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx),
+                                       spv);
+    if (spv.empty()) {
+        return false;
     }
+    const vk::ShaderModule module = CompileSPV(spv, instance.GetDevice());
     if (cached_program == nullptr) {
         const auto [it_pgm, new_program] = program_cache.try_emplace(program->info.pgm_hash);
         ASSERT(new_program);
@@ -532,15 +513,8 @@ void PipelineCache::WarmUp() {
             }
         });
 
-    if (DeferPipelineCreationDuringWarmup()) {
-        LOG_INFO(Render,
-                 "Prepared {} cached pipelines from {} shader permutations for on-demand "
-                 "creation",
-                 num_pipelines, restored_shader_stages.size());
-    } else {
-        LOG_INFO(Render, "Preloaded {} pipelines from {} shader permutations", num_pipelines,
-                 restored_shader_stages.size());
-    }
+    LOG_INFO(Render, "Preloaded {} pipelines from {} shader permutations", num_pipelines,
+             restored_shader_stages.size());
     if (num_total_pipelines > num_pipelines) {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
                     num_total_pipelines - num_pipelines);

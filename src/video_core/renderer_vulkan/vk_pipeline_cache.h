@@ -100,8 +100,6 @@ private:
     bool RefreshGraphicsKey();
     bool RefreshGraphicsStages();
     bool RefreshComputeKey();
-    [[nodiscard]] bool DeferPipelineCreationDuringWarmup() const;
-    [[nodiscard]] bool DeferShaderModuleCreationDuringWarmup() const;
     void RestoreDriverPipelineCache();
     void SaveDriverPipelineCache();
 
@@ -112,8 +110,6 @@ private:
     vk::ShaderModule CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                    const std::span<const u32>& code, size_t perm_idx,
                                    Shader::Backend::Bindings& binding);
-    vk::ShaderModule RestoreModule(Program& program, size_t perm_idx,
-                                   const std::span<const u32>& code);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::Stage stage, Shader::LogicalStage l_stage);
 
     [[nodiscard]] bool IsPipelineCacheDirty() const {
