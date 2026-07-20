@@ -80,7 +80,11 @@ ImageViewInfo::ImageViewInfo(const AmdGpu::Image& image, const Shader::ImageReso
     if (is_storage && nfmt == AmdGpu::NumberFormat::Srgb) {
         nfmt = AmdGpu::NumberFormat::Unorm;
     }
-    format = Vulkan::LiverpoolToVK::SurfaceFormat(dfmt, nfmt);
+    format = is_storage && desc.storage_format != Shader::StorageImageFormat::Native
+                 ? vk::Format::eR16Uint
+                 : Vulkan::LiverpoolToVK::SurfaceFormat(dfmt, nfmt);
+    requires_storage_without_format =
+        is_storage && !desc.is_atomic && desc.storage_format == Shader::StorageImageFormat::Native;
     if (desc.is_depth) {
         format = Vulkan::LiverpoolToVK::PromoteFormatToDepth(format);
     }
@@ -137,7 +141,8 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
         aspect = vk::ImageAspectFlagBits::eStencil;
     }
 
-    const auto required_features = ViewFormatFeatures(info.usage, info.is_storage);
+    const auto required_features =
+        ViewFormatFeatures(info.usage, info.requires_storage_without_format);
     const vk::ImageViewCreateInfo image_view_ci = {
         .pNext = &usage_ci,
         .image = image.GetImage(),

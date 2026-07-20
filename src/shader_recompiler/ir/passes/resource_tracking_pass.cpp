@@ -265,6 +265,12 @@ public:
         auto& image = image_resources[index];
         image.is_atomic |= desc.is_atomic;
         image.is_written |= desc.is_written;
+        if (image.storage_format == StorageImageFormat::Native) {
+            image.storage_format = desc.storage_format;
+        } else {
+            ASSERT(desc.storage_format == StorageImageFormat::Native ||
+                   image.storage_format == desc.storage_format);
+        }
         return index;
     }
 
@@ -561,6 +567,9 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
 
     auto image = image_res.GetSharp(info);
     ASSERT(image.GetType() != AmdGpu::ImageType::Invalid);
+    if (is_written && !is_atomic) {
+        image_res.storage_format = GetStorageImageFormat(image.GetDataFmt(), image.GetNumberFmt());
+    }
 
     if (needs_mip_storage_fallback) {
         // If the mip level to IMAGE_(LOAD/STORE)_MIP is a constant, set up ImageResource
@@ -896,6 +905,64 @@ IR::Value FixCubeCoords(IR::IREmitter& ir, const AmdGpu::Image& image, const IR:
     return ir.CompositeConstruct(fixed_x, fixed_y, face);
 }
 
+struct Packed16Component {
+    u32 offset;
+    u32 width;
+};
+
+using Packed16Layout = std::array<Packed16Component, 4>;
+
+constexpr Packed16Layout GetPacked16Layout(StorageImageFormat format) {
+    switch (format) {
+    case StorageImageFormat::Raw16R5G6B5Unorm:
+        // VK_FORMAT_R5G6B5_UNORM_PACK16: B[4:0], G[10:5], R[15:11].
+        return {{{11, 5}, {5, 6}, {0, 5}, {0, 0}}};
+    case StorageImageFormat::Raw16A1R5G5B5Unorm:
+        // VK_FORMAT_A1R5G5B5_UNORM_PACK16: B[4:0], G[9:5], R[14:10], A[15].
+        return {{{10, 5}, {5, 5}, {0, 5}, {15, 1}}};
+    case StorageImageFormat::Raw16B4G4R4A4Unorm:
+        // VK_FORMAT_B4G4R4A4_UNORM_PACK16: A[3:0], R[7:4], G[11:8], B[15:12].
+        return {{{4, 4}, {8, 4}, {12, 4}, {0, 4}}};
+    case StorageImageFormat::Native:
+        break;
+    }
+    UNREACHABLE();
+}
+
+IR::Value UnpackRaw16Storage(IR::IREmitter& ir, const IR::Value& texel, StorageImageFormat format) {
+    const IR::U32 raw = ir.BitCast<IR::U32>(IR::F32{ir.CompositeExtract(texel, 0)});
+    boost::container::static_vector<IR::Value, 4> components;
+    for (const auto [offset, width] : GetPacked16Layout(format)) {
+        if (width == 0) {
+            components.push_back(ir.Imm32(1.0f));
+            continue;
+        }
+        const IR::U32 bits = ir.BitFieldExtract(raw, ir.Imm32(offset), ir.Imm32(width), false);
+        const float max_value = static_cast<float>((1u << width) - 1u);
+        components.push_back(ir.FPDiv(ir.ConvertUToF(32, 32, bits), ir.Imm32(max_value)));
+    }
+    return ir.CompositeConstruct(components);
+}
+
+IR::Value PackRaw16Storage(IR::IREmitter& ir, const IR::Value& texel, StorageImageFormat format) {
+    IR::U32 raw = ir.Imm32(0u);
+    const auto layout = GetPacked16Layout(format);
+    for (u32 i = 0; i < layout.size(); ++i) {
+        const auto [offset, width] = layout[i];
+        if (width == 0) {
+            continue;
+        }
+        const IR::F32 component{ir.CompositeExtract(texel, i)};
+        const float max_value = static_cast<float>((1u << width) - 1u);
+        const IR::F32 scaled =
+            ir.FPMul(ir.FPClamp(component, ir.Imm32(0.0f), ir.Imm32(1.0f)), ir.Imm32(max_value));
+        const IR::U32 bits = ir.ConvertFToU(32, ir.FPRoundEven(scaled));
+        raw = ir.BitwiseOr(raw, ir.ShiftLeftLogical(bits, ir.Imm32(offset)));
+    }
+    const IR::F32 packed = ir.BitCast<IR::F32>(raw);
+    return ir.CompositeConstruct(packed, ir.Imm32(0.0f), ir.Imm32(0.0f), ir.Imm32(0.0f));
+}
+
 void PatchImageSampleArgs(IR::Block& block, IR::Inst& inst, Info& info,
                           const ImageResource& image_res, const AmdGpu::Image& image) {
     const auto handle = inst.Arg(0);
@@ -1161,6 +1228,9 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
     if (inst.GetOpcode() == IR::Opcode::ImageRead) {
         auto texel = ir.ImageRead(image_handle, coords, lod, ms, inst_info);
         if (is_storage) {
+            if (image_res.storage_format != StorageImageFormat::Native) {
+                texel = UnpackRaw16Storage(ir, texel, image_res.storage_format);
+            }
             // Storage image requires shader swizzle.
             texel = ApplySwizzle(ir, texel, image.DstSelect());
         }
@@ -1180,7 +1250,9 @@ void PatchImageArgs(IR::Block& block, IR::Inst& inst, Info& info) {
             }
             const auto converted =
                 ApplyWriteNumberConversionVec4(ir, texel, image.GetNumberConversion());
-            inst.SetArg(4, converted);
+            inst.SetArg(4, image_res.storage_format == StorageImageFormat::Native
+                               ? converted
+                               : PackRaw16Storage(ir, converted, image_res.storage_format));
         }
     }
 }

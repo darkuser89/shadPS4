@@ -73,6 +73,33 @@ using BufferResourceList = boost::container::static_vector<BufferResource, NUM_B
 
 enum class MipStorageFallbackMode : u32 { None, DynamicIndex, ConstantIndex };
 
+// Packed 16-bit color formats are not universally available as storage images. A raw R16_UINT
+// view is bit-compatible with these formats and lets the shader preserve the guest format's
+// exact packing while the image remains in its native format for sampling and rendering.
+enum class StorageImageFormat : u8 {
+    Native,
+    Raw16R5G6B5Unorm,
+    Raw16A1R5G5B5Unorm,
+    Raw16B4G4R4A4Unorm,
+};
+
+constexpr StorageImageFormat GetStorageImageFormat(AmdGpu::DataFormat data_format,
+                                                   AmdGpu::NumberFormat num_format) {
+    if (num_format != AmdGpu::NumberFormat::Unorm) {
+        return StorageImageFormat::Native;
+    }
+    switch (data_format) {
+    case AmdGpu::DataFormat::Format5_6_5:
+        return StorageImageFormat::Raw16R5G6B5Unorm;
+    case AmdGpu::DataFormat::Format1_5_5_5:
+        return StorageImageFormat::Raw16A1R5G5B5Unorm;
+    case AmdGpu::DataFormat::Format4_4_4_4:
+        return StorageImageFormat::Raw16B4G4R4A4Unorm;
+    default:
+        return StorageImageFormat::Native;
+    }
+}
+
 struct ImageResource {
     u32 sharp_idx;
     bool is_depth{};
@@ -80,6 +107,7 @@ struct ImageResource {
     bool is_array{};
     bool is_written{};
     bool is_r128{};
+    StorageImageFormat storage_format{};
     MipStorageFallbackMode mip_fallback_mode{};
     u32 constant_mip_index{};
 

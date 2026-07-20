@@ -36,6 +36,7 @@ struct ImageViewInfo {
     vk::ComponentMapping mapping{};
     vk::ImageUsageFlags usage = vk::ImageUsageFlagBits::eSampled;
     bool is_storage = false;
+    bool requires_storage_without_format = false;
 
     auto operator<=>(const ImageViewInfo&) const = default;
 };

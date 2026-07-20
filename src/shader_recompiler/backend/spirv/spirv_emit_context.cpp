@@ -930,7 +930,12 @@ spv::ImageFormat GetFormat(const AmdGpu::Image& image) {
 
 Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
     const auto image = desc.GetSharp(ctx.info);
-    const auto format = desc.is_atomic ? GetFormat(image) : spv::ImageFormat::Unknown;
+    spv::ImageFormat format = spv::ImageFormat::Unknown;
+    if (desc.is_written && desc.storage_format != StorageImageFormat::Native) {
+        format = spv::ImageFormat::R16ui;
+    } else if (desc.is_atomic) {
+        format = GetFormat(image);
+    }
     const auto type = image.GetViewType(desc.is_array);
     const u32 sampled = desc.is_written ? 2 : 1;
     switch (type) {
@@ -956,10 +961,13 @@ void EmitContext::DefineImagesAndSamplers() {
     for (const auto& image_desc : info.images) {
         const auto sharp = image_desc.GetSharp(info);
         const auto nfmt = sharp.GetNumberFmt();
-        const bool is_integer = AmdGpu::IsInteger(nfmt);
         const bool is_storage = image_desc.is_written;
+        const bool uses_raw_storage =
+            is_storage && image_desc.storage_format != StorageImageFormat::Native;
+        const bool is_integer = uses_raw_storage || AmdGpu::IsInteger(nfmt);
         const MipStorageFallbackMode mip_fallback_mode = image_desc.mip_fallback_mode;
-        const VectorIds& data_types = GetAttributeType(*this, nfmt);
+        const VectorIds& data_types =
+            GetAttributeType(*this, uses_raw_storage ? AmdGpu::NumberFormat::Uint : nfmt);
         const Id sampled_type = data_types[1];
         const Id image_type{ImageType(*this, image_desc, sampled_type)};
 
