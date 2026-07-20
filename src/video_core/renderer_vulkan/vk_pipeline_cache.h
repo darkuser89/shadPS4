@@ -100,6 +100,7 @@ private:
     bool RefreshGraphicsKey();
     bool RefreshGraphicsStages();
     bool RefreshComputeKey();
+    [[nodiscard]] bool DeferPipelineCreationDuringWarmup() const;
     void RestoreDriverPipelineCache();
     void SaveDriverPipelineCache();
 

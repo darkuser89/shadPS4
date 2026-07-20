@@ -327,6 +327,14 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
 
 PipelineCache::~PipelineCache() = default;
 
+bool PipelineCache::DeferPipelineCreationDuringWarmup() const {
+    // KosmicKrisp translates Vulkan pipelines through NIR to Metal. Recreating every serialized
+    // pipeline before the first frame front-loads that translation even when a title does not use
+    // most of its historical cache during the current session. Shader modules are still restored
+    // during warmup; the comparatively expensive VkPipeline objects are created on first use.
+    return instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp;
+}
+
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
     if (!RefreshGraphicsKey()) {
         return nullptr;
