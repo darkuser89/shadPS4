@@ -281,6 +281,8 @@ public:
     Id shared_memory_u16{};
     Id shared_memory_u32{};
     Id shared_memory_u64{};
+    Id wave64_scratch{};
+    Id wave64_scratch_u32{};
 
     Id shared_memory_u16_type{};
     Id shared_memory_u32_type{};
@@ -396,6 +398,7 @@ private:
     void DefineBuffers();
     void DefineImagesAndSamplers();
     void DefineSharedMemory();
+    void DefineWave64Scratch();
     void DefineFunctions();
 
     SpirvAttribute GetAttributeInfo(AmdGpu::NumberFormat fmt, Id id, u32 num_components,

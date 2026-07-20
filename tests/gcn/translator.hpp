@@ -12,3 +12,6 @@ std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst);
 std::vector<u32> TranslateToSpirv(u64 raw_gcn_inst, const Shader::Profile& profile);
 std::vector<u32> EmitGroupAnyToSpirv(const Shader::Profile& profile);
 std::vector<u32> EmitLaneIdToSpirv(const Shader::Profile& profile);
+std::vector<u32> EmitReadLaneToSpirv(const Shader::Profile& profile, u32 workgroup_size);
+std::vector<u32> EmitWriteLaneToSpirv(const Shader::Profile& profile);
+std::vector<u32> EmitBallotFindLsbToSpirv(const Shader::Profile& profile);

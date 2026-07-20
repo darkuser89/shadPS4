@@ -19,6 +19,8 @@ void DeadCodeEliminationPass(IR::Program& program);
 void ConstantPropagationPass(IR::BlockList& program);
 void FlattenExtendedUserdataPass(IR::Program& program);
 void ReadLaneEliminationPass(IR::Program& program);
+void ComputeWave64EmulationPass(IR::Program& program, const RuntimeInfo& runtime_info,
+                                const Profile& profile);
 void ResourceTrackingPass(IR::Program& program, const Profile& profile);
 void CollectShaderInfoPass(IR::Program& program, const Profile& profile);
 void LowerBufferFormatToRaw(IR::Program& program);

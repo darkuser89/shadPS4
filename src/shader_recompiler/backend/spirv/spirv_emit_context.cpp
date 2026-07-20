@@ -81,6 +81,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineArithmeticTypes();
     DefineInterfaces();
     DefineSharedMemory();
+    DefineWave64Scratch();
     DefineBuffers();
     DefineImagesAndSamplers();
     DefineFunctions();
@@ -307,15 +308,15 @@ void EmitContext::DefineWorkgroupIndex() {
 }
 
 void EmitContext::DefineInputs() {
-    if (info.uses_lane_id) {
-        if (info.l_stage == LogicalStage::Compute && profile.needs_compute_wave64_emulation) {
-            local_invocation_index = DefineVariable(U32[1], spv::BuiltIn::LocalInvocationIndex,
-                                                    spv::StorageClass::Input);
-        } else {
-            subgroup_local_invocation_id = DefineVariable(
-                U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
-            Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
-        }
+    const bool use_logical_wave64_index =
+        info.l_stage == LogicalStage::Compute && profile.needs_compute_wave64_emulation;
+    if (use_logical_wave64_index && (info.uses_lane_id || info.emulate_compute_wave64_cross_lane)) {
+        local_invocation_index =
+            DefineVariable(U32[1], spv::BuiltIn::LocalInvocationIndex, spv::StorageClass::Input);
+    } else if (info.uses_lane_id) {
+        subgroup_local_invocation_id = DefineVariable(
+            U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
+        Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
     }
     switch (l_stage) {
     case LogicalStage::Vertex: {
@@ -1068,6 +1069,19 @@ void EmitContext::DefineSharedMemory() {
         make_type(IR::Type::U32, U32[1], 4u, "shared_mem_u32");
     std::tie(shared_memory_u64, shared_u64, shared_memory_u64_type) =
         make_type(IR::Type::U64, U64, 8u, "shared_mem_u64");
+}
+
+void EmitContext::DefineWave64Scratch() {
+    if (!info.emulate_compute_wave64_cross_lane) {
+        return;
+    }
+
+    const Id array_type = TypeArray(U32[1], ConstU32(64U));
+    const Id pointer_type = TypePointer(spv::StorageClass::Workgroup, array_type);
+    wave64_scratch_u32 = TypePointer(spv::StorageClass::Workgroup, U32[1]);
+    wave64_scratch = AddGlobalVariable(pointer_type, spv::StorageClass::Workgroup);
+    Name(wave64_scratch, "wave64_scratch");
+    interfaces.push_back(wave64_scratch);
 }
 
 Id EmitContext::DefineFloat32ToUfloatM5(u32 mantissa_bits, const std::string_view name) {

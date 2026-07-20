@@ -160,3 +160,93 @@ std::vector<u32> EmitLaneIdToSpirv(const Profile& profile) {
     Backend::Bindings bindings{};
     return Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
 }
+
+std::vector<u32> EmitReadLaneToSpirv(const Profile& profile, u32 workgroup_size) {
+    Shader::Info info{};
+    info.stage = Stage::Compute;
+    info.l_stage = LogicalStage::Compute;
+
+    IR::Program program{info};
+    Pools pools{};
+    IR::Block* block = pools.block_pool.Create(pools.inst_pool);
+    program.blocks.push_back(block);
+    program.syntax_list.emplace_back();
+    program.syntax_list.back().type = IR::AbstractSyntaxNode::Type::Block;
+    program.syntax_list.back().data.block = block;
+    program.syntax_list.emplace_back();
+    program.syntax_list.back().type = IR::AbstractSyntaxNode::Type::Return;
+    program.post_order_blocks = Shader::IR::PostOrder(program.syntax_list.front());
+
+    IR::IREmitter ir{*block};
+    ir.Reference(ir.ReadLane(ir.LaneId(), ir.Imm32(40U)));
+
+    RuntimeInfo runtime_info{};
+    runtime_info.Initialize(Stage::Compute);
+    runtime_info.cs_info.workgroup_size = {workgroup_size, 1, 1};
+
+    Shader::Optimization::CollectShaderInfoPass(program, profile);
+    Shader::Optimization::ComputeWave64EmulationPass(program, runtime_info, profile);
+
+    Backend::Bindings bindings{};
+    return Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
+}
+
+std::vector<u32> EmitWriteLaneToSpirv(const Profile& profile) {
+    Shader::Info info{};
+    info.stage = Stage::Compute;
+    info.l_stage = LogicalStage::Compute;
+
+    IR::Program program{info};
+    Pools pools{};
+    IR::Block* block = pools.block_pool.Create(pools.inst_pool);
+    program.blocks.push_back(block);
+    program.syntax_list.emplace_back();
+    program.syntax_list.back().type = IR::AbstractSyntaxNode::Type::Block;
+    program.syntax_list.back().data.block = block;
+    program.syntax_list.emplace_back();
+    program.syntax_list.back().type = IR::AbstractSyntaxNode::Type::Return;
+    program.post_order_blocks = Shader::IR::PostOrder(program.syntax_list.front());
+
+    IR::IREmitter ir{*block};
+    ir.Reference(ir.WriteLane(ir.LaneId(), ir.Imm32(0x12345678U), ir.Imm32(40U)));
+
+    RuntimeInfo runtime_info{};
+    runtime_info.Initialize(Stage::Compute);
+    runtime_info.cs_info.workgroup_size = {64, 1, 1};
+
+    Shader::Optimization::CollectShaderInfoPass(program, profile);
+
+    Backend::Bindings bindings{};
+    return Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
+}
+
+std::vector<u32> EmitBallotFindLsbToSpirv(const Profile& profile) {
+    Shader::Info info{};
+    info.stage = Stage::Compute;
+    info.l_stage = LogicalStage::Compute;
+
+    IR::Program program{info};
+    Pools pools{};
+    IR::Block* block = pools.block_pool.Create(pools.inst_pool);
+    program.blocks.push_back(block);
+    program.syntax_list.emplace_back();
+    program.syntax_list.back().type = IR::AbstractSyntaxNode::Type::Block;
+    program.syntax_list.back().data.block = block;
+    program.syntax_list.emplace_back();
+    program.syntax_list.back().type = IR::AbstractSyntaxNode::Type::Return;
+    program.post_order_blocks = Shader::IR::PostOrder(program.syntax_list.front());
+
+    IR::IREmitter ir{*block};
+    const IR::U1 active = ir.ILessThan(ir.LaneId(), ir.Imm32(40U), false);
+    ir.Reference(ir.BallotFindLsb(ir.Ballot(active)));
+
+    RuntimeInfo runtime_info{};
+    runtime_info.Initialize(Stage::Compute);
+    runtime_info.cs_info.workgroup_size = {64, 1, 1};
+
+    Shader::Optimization::CollectShaderInfoPass(program, profile);
+    Shader::Optimization::ComputeWave64EmulationPass(program, runtime_info, profile);
+
+    Backend::Bindings bindings{};
+    return Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
+}

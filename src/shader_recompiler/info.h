@@ -139,6 +139,7 @@ struct Info : InfoPersistent {
     bool uses_group_quad{};
     bool uses_group_ballot{};
     bool uses_group_vote{};
+    bool emulate_compute_wave64_cross_lane{};
     IR::Type shared_types{};
     bool uses_fp16{};
     bool uses_fp64{};

@@ -291,10 +291,10 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     if (info.uses_group_quad) {
         ctx.AddCapability(spv::Capability::GroupNonUniformQuad);
     }
-    if (info.uses_group_ballot) {
+    if (info.uses_group_ballot && !info.emulate_compute_wave64_cross_lane) {
         ctx.AddCapability(spv::Capability::GroupNonUniformBallot);
     }
-    if (info.uses_group_vote) {
+    if (info.uses_group_vote && !info.emulate_compute_wave64_cross_lane) {
         if (profile.SupportsSubgroup(SubgroupFeature::Vote) ||
             !profile.SupportsSubgroup(SubgroupFeature::Ballot)) {
             ctx.AddCapability(spv::Capability::GroupNonUniformVote);

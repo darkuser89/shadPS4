@@ -129,6 +129,79 @@ TEST(SpirvEmission, compute_lane_id_uses_native_wave64_index_when_available) {
     EXPECT_TRUE(ContainsSpirvCapability(spirv, spv::CapabilityGroupNonUniform));
 }
 
+TEST(SpirvEmission, compute_readlane_crosses_wave32_halves_for_one_guest_wave) {
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.max_shared_memory_size = 32U * 1024U;
+    profile.subgroup_size = 32;
+    profile.subgroup_supported_operations = static_cast<u32>(Shader::SubgroupFeature::Ballot);
+    profile.needs_compute_wave64_emulation = true;
+
+    const auto spirv = EmitReadLaneToSpirv(profile, 64U);
+
+    EXPECT_TRUE(ContainsSpirvBuiltIn(spirv, spv::BuiltInLocalInvocationIndex));
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::OpControlBarrier));
+    EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::OpGroupNonUniformBroadcast));
+}
+
+TEST(SpirvEmission, compute_readlane_keeps_subgroup_path_for_non_wave64_workgroups) {
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.max_shared_memory_size = 32U * 1024U;
+    profile.subgroup_size = 32;
+    profile.subgroup_supported_operations = static_cast<u32>(Shader::SubgroupFeature::Ballot);
+    profile.needs_compute_wave64_emulation = true;
+
+    const auto spirv = EmitReadLaneToSpirv(profile, 32U);
+
+    EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::OpControlBarrier));
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::OpGroupNonUniformBroadcast));
+}
+
+TEST(SpirvEmission, compute_readlane_keeps_subgroup_path_without_scratch_memory) {
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.max_shared_memory_size = 128U;
+    profile.subgroup_size = 32;
+    profile.subgroup_supported_operations = static_cast<u32>(Shader::SubgroupFeature::Ballot);
+    profile.needs_compute_wave64_emulation = true;
+
+    const auto spirv = EmitReadLaneToSpirv(profile, 64U);
+
+    EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::OpControlBarrier));
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::OpGroupNonUniformBroadcast));
+}
+
+TEST(SpirvEmission, compute_writelane_updates_only_the_requested_logical_lane) {
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.subgroup_size = 32;
+    profile.needs_compute_wave64_emulation = true;
+
+    const auto spirv = EmitWriteLaneToSpirv(profile);
+
+    EXPECT_TRUE(ContainsSpirvBuiltIn(spirv, spv::BuiltInLocalInvocationIndex));
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::OpSelect));
+    EXPECT_FALSE(ContainsSpirvCapability(spirv, spv::CapabilityGroupNonUniformBallot));
+}
+
+TEST(SpirvEmission, compute_ballot_combines_both_wave32_halves) {
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.max_shared_memory_size = 32U * 1024U;
+    profile.subgroup_size = 32;
+    profile.subgroup_supported_operations = static_cast<u32>(Shader::SubgroupFeature::Ballot);
+    profile.needs_compute_wave64_emulation = true;
+
+    const auto spirv = EmitBallotFindLsbToSpirv(profile);
+
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::OpAtomicOr));
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::OpControlBarrier));
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::OpExtInst));
+    EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::OpGroupNonUniformBallot));
+    EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::OpGroupNonUniformBallotFindLSB));
+}
+
 // Example
 // TEST_F(GcnTest, test_name) {
 //     // Runner sets the vulkan context
