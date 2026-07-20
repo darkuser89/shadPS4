@@ -306,9 +306,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_fragment_shader_barycentric = instance_.IsFragmentShaderBarycentricSupported(),
         .needs_manual_interpolation = instance.IsFragmentShaderBarycentricSupported() &&
                                       instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
-        // GCN workgroups can rely on implicit Wave64 lockstep for LDS access. A host subgroup
-        // narrower than 64 needs explicit barriers unless compute pipelines can request Wave64.
-        .needs_lds_barriers =
+        // PS4 compute shaders execute in Wave64. Use the emulation path when the host neither
+        // exposes native Wave64 nor supports requesting a 64-lane compute subgroup.
+        .needs_compute_wave64_emulation =
             !instance.IsSubgroupSize64Supported() && instance.SubgroupSize() != 64,
         .needs_buffer_offsets = instance.StorageMinAlignment() > 4,
         .needs_unorm_fixup = instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,

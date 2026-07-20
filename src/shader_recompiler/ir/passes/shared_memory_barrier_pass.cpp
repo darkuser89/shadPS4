@@ -93,7 +93,7 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
     // The compiler can only omit barriers when the local workgroup size is the same as the HW
     // subgroup.
     if (shared_memory_size == 0 || threadgroup_size != GcnSubgroupSize ||
-        !profile.needs_lds_barriers) {
+        !profile.needs_compute_wave64_emulation) {
         return;
     }
     using Type = IR::AbstractSyntaxNode::Type;

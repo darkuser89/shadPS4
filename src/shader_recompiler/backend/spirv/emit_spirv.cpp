@@ -284,7 +284,8 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
         ctx.AddExtension("SPV_EXT_shader_atomic_float_min_max");
         ctx.AddCapability(spv::Capability::AtomicFloat32MinMaxEXT);
     }
-    if (info.uses_lane_id) {
+    if (info.uses_lane_id &&
+        !(info.l_stage == LogicalStage::Compute && profile.needs_compute_wave64_emulation)) {
         ctx.AddCapability(spv::Capability::GroupNonUniform);
     }
     if (info.uses_group_quad) {

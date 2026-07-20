@@ -58,6 +58,23 @@ static bool ContainsSpirvCapability(std::span<const u32> spirv, spv::Capability 
     return false;
 }
 
+static bool ContainsSpirvBuiltIn(std::span<const u32> spirv, spv::BuiltIn builtin) {
+    for (size_t offset = 5; offset < spirv.size();) {
+        const u32 word = spirv[offset];
+        const u32 word_count = word >> 16;
+        if (word_count == 0 || offset + word_count > spirv.size()) {
+            return false;
+        }
+        if ((word & 0xffffu) == static_cast<u32>(spv::OpDecorate) && word_count >= 4 &&
+            spirv[offset + 2] == static_cast<u32>(spv::DecorationBuiltIn) &&
+            spirv[offset + 3] == static_cast<u32>(builtin)) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
 TEST(SpirvEmission, group_any_falls_back_to_ballot_when_vote_is_unavailable) {
     Shader::Profile profile{};
     profile.supported_spirv = 0x00010600;
@@ -84,6 +101,32 @@ TEST(SpirvEmission, group_any_uses_vote_when_supported) {
     EXPECT_FALSE(ContainsSpirvOpcode(spirv, spv::OpGroupNonUniformBallot));
     EXPECT_TRUE(ContainsSpirvCapability(spirv, spv::CapabilityGroupNonUniformVote));
     EXPECT_FALSE(ContainsSpirvCapability(spirv, spv::CapabilityGroupNonUniformBallot));
+}
+
+TEST(SpirvEmission, compute_lane_id_uses_logical_wave64_index_on_wave32) {
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.subgroup_size = 32;
+    profile.needs_compute_wave64_emulation = true;
+
+    const auto spirv = EmitLaneIdToSpirv(profile);
+
+    EXPECT_TRUE(ContainsSpirvBuiltIn(spirv, spv::BuiltInLocalInvocationIndex));
+    EXPECT_FALSE(ContainsSpirvBuiltIn(spirv, spv::BuiltInSubgroupLocalInvocationId));
+    EXPECT_TRUE(ContainsSpirvOpcode(spirv, spv::OpBitwiseAnd));
+    EXPECT_FALSE(ContainsSpirvCapability(spirv, spv::CapabilityGroupNonUniform));
+}
+
+TEST(SpirvEmission, compute_lane_id_uses_native_wave64_index_when_available) {
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.subgroup_size = 64;
+
+    const auto spirv = EmitLaneIdToSpirv(profile);
+
+    EXPECT_TRUE(ContainsSpirvBuiltIn(spirv, spv::BuiltInSubgroupLocalInvocationId));
+    EXPECT_FALSE(ContainsSpirvBuiltIn(spirv, spv::BuiltInLocalInvocationIndex));
+    EXPECT_TRUE(ContainsSpirvCapability(spirv, spv::CapabilityGroupNonUniform));
 }
 
 // Example
