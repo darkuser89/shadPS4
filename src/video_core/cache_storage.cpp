@@ -27,7 +27,6 @@ bool accept_requests{};
 std::condition_variable_any request_cv{};
 std::condition_variable requests_drained_cv{};
 std::queue<std::packaged_task<void()>> req_queue{};
-std::mutex m_request{};
 
 mz_zip_archive zip_ar{};
 bool ar_is_read_only{true};
@@ -39,42 +38,26 @@ namespace Storage {
 void ProcessIO(const std::stop_token& stoken) {
     Common::SetCurrentThreadName("shadPS4:PipelineCacheIO");
 
-    while (!stoken.stop_requested()) {
+    while (true) {
+        std::packaged_task<void()> request{};
         {
-            std::unique_lock lk{submit_mutex};
-            Common::CondvarWait(request_cv, lk, stoken, [&] { return num_requests; });
+            std::unique_lock lock{submit_mutex};
+            Common::CondvarWait(request_cv, lock, stoken, [&] { return !req_queue.empty(); });
+            if (req_queue.empty()) {
+                break;
+            }
+            request = std::move(req_queue.front());
+            req_queue.pop();
         }
 
-        if (stoken.stop_requested()) {
-            break;
+        request();
+
+        bool requests_drained{};
+        {
+            std::scoped_lock lock{submit_mutex};
+            requests_drained = --num_requests == 0;
         }
-
-        while (true) {
-            {
-                std::scoped_lock lock{submit_mutex};
-                if (num_requests == 0) {
-                    break;
-                }
-            }
-
-            std::packaged_task<void()> request{};
-            {
-                std::scoped_lock lock{m_request};
-                if (req_queue.empty()) {
-                    continue;
-                }
-                request = std::move(req_queue.front());
-                req_queue.pop();
-            }
-
-            if (request.valid()) {
-                request();
-            }
-
-            {
-                std::scoped_lock lock{submit_mutex};
-                --num_requests;
-            }
+        if (requests_drained) {
             requests_drained_cv.notify_all();
         }
     }
@@ -213,11 +196,10 @@ bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector
         }};
 
     {
-        std::scoped_lock submit_lock{submit_mutex};
+        std::scoped_lock lock{submit_mutex};
         if (!accept_requests) {
             return false;
         }
-        std::scoped_lock lock{m_request};
         req_queue.emplace(std::move(request));
         ++num_requests;
     }

@@ -25,6 +25,13 @@ class Instance;
 class Scheduler;
 class DescriptorHeap;
 
+constexpr bool CanUsePushDescriptors(u32 descriptor_count, u32 max_push_descriptors) {
+    return max_push_descriptors != 0 && descriptor_count <= max_push_descriptors;
+}
+
+static_assert(CanUsePushDescriptors(32, 32));
+static_assert(!CanUsePushDescriptors(1, 0));
+
 class Pipeline {
 public:
     Pipeline(const Instance& instance, Scheduler& scheduler, DescriptorHeap& desc_heap,
