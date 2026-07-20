@@ -176,10 +176,10 @@ s32 PS4_SYSV_ABI sceKernelSetVirtualRangeName(const void* addr, u64 len, const c
 
 s32 PS4_SYSV_ABI sceKernelMemoryPoolExpand(u64 searchStart, u64 searchEnd, u64 len, u64 alignment,
                                            u64* physAddrOut);
-s32 PS4_SYSV_ABI sceKernelMemoryPoolReserve(void* addr_in, u64 len, u64 alignment, s32 flags,
+s32 PS4_SYSV_ABI sceKernelMemoryPoolReserve(VAddr addr_in, u64 len, u64 alignment, s32 flags,
                                             void** addr_out);
-s32 PS4_SYSV_ABI sceKernelMemoryPoolCommit(void* addr, u64 len, s32 type, s32 prot, s32 flags);
-s32 PS4_SYSV_ABI sceKernelMemoryPoolDecommit(void* addr, u64 len, s32 flags);
+s32 PS4_SYSV_ABI sceKernelMemoryPoolCommit(VAddr addr, u64 len, s32 type, s32 prot, s32 flags);
+s32 PS4_SYSV_ABI sceKernelMemoryPoolDecommit(VAddr addr, u64 len, s32 flags);
 s32 PS4_SYSV_ABI sceKernelMemoryPoolBatch(const OrbisKernelMemoryPoolBatchEntry* entries, s32 count,
                                           s32* num_processed, s32 flags);
 s32 PS4_SYSV_ABI sceKernelMemoryPoolGetBlockStats(OrbisKernelMemoryPoolBlockStats* stats, u64 size);

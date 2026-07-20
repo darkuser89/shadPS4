@@ -233,7 +233,9 @@ bool AvPlayerState::Resume() {
 }
 
 bool AvPlayerState::JumpToTime(u64 time_msec) {
-    std::shared_lock lock(m_source_mutex);
+    // Seeking stops and recreates the source's worker pipeline. Exclude frame retrieval while the
+    // source is between those two states.
+    std::unique_lock lock(m_source_mutex);
     if (m_up_source == nullptr || m_current_state == AvState::Initial ||
         m_current_state == AvState::AddingSource || m_current_state == AvState::Ready ||
         m_current_state == AvState::Stop || m_current_state == AvState::Error) {

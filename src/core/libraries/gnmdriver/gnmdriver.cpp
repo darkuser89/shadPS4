@@ -1200,6 +1200,12 @@ int PS4_SYSV_ABI sceGnmMapComputeQueue(u32 pipe_id, u32 queue_id, VAddr ring_bas
                                        u32 ring_size_dw, u32* read_ptr_addr) {
     LOG_TRACE(Lib_GnmDriver, "called");
 
+    // VAddr is an integer ABI argument, so the FEX HLE thunk cannot recognize it
+    // as a guest pointer. Resolve fixed guest mappings before the native GPU
+    // thread stores and dereferences the compute-ring address.
+    ring_base_addr =
+        Core::Memory::Instance()->TranslateCanonicalGuestAddress(ring_base_addr);
+
     if (pipe_id >= Liverpool::NumComputePipes) {
         return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_PIPE_ID;
     }
@@ -2183,7 +2189,9 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     u32* ccb_sizes_in_bytes, u32 vo_handle, u32 buf_idx, u32 flip_mode, s64 flip_arg) {
     LOG_DEBUG(Lib_GnmDriver, "called [buf = {}]", buf_idx);
 
-    auto* cmdbuf = dcb_gpu_addrs[count - 1];
+    const auto cmdbuf_addr = Core::Memory::Instance()->TranslateCanonicalGuestAddress(
+        reinterpret_cast<VAddr>(dcb_gpu_addrs[count - 1]));
+    auto* cmdbuf = reinterpret_cast<u32*>(cmdbuf_addr);
     const auto size_dw = dcb_sizes_in_bytes[count - 1] / 4;
 
     const s32 patch_result =
@@ -2261,13 +2269,21 @@ int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
     }
 
     for (auto cbpair = 0u; cbpair < count; ++cbpair) {
-        const auto* ccb = ccb_gpu_addrs ? ccb_gpu_addrs[cbpair] : nullptr;
+        const auto dcb_addr = Core::Memory::Instance()->TranslateCanonicalGuestAddress(
+            reinterpret_cast<VAddr>(dcb_gpu_addrs[cbpair]));
+        const auto* dcb = reinterpret_cast<const u32*>(dcb_addr);
+
+        const auto ccb_addr = ccb_gpu_addrs
+                                  ? Core::Memory::Instance()->TranslateCanonicalGuestAddress(
+                                        reinterpret_cast<VAddr>(ccb_gpu_addrs[cbpair]))
+                                  : 0;
+        const auto* ccb = reinterpret_cast<const u32*>(ccb_addr);
         const auto ccb_size_in_bytes = ccb_sizes_in_bytes ? ccb_sizes_in_bytes[cbpair] : 0;
 
         const auto dcb_size_dw = dcb_sizes_in_bytes[cbpair] >> 2;
         const auto ccb_size_dw = ccb_size_in_bytes >> 2;
 
-        const auto& dcb_span = std::span{dcb_gpu_addrs[cbpair], dcb_size_dw};
+        const auto& dcb_span = std::span{dcb, dcb_size_dw};
         const auto& ccb_span = std::span{ccb, ccb_size_dw};
 
         if (DebugState.DumpingCurrentFrame()) {
@@ -2287,7 +2303,7 @@ int PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
                 .submit_num = seq_num,
                 .num2 = cbpair,
                 .data = {dcb_span.begin(), dcb_span.end()},
-                .base_addr = reinterpret_cast<uintptr_t>(dcb_gpu_addrs[cbpair]),
+                .base_addr = reinterpret_cast<uintptr_t>(dcb),
             });
             DebugState.PushQueueDump({
                 .type = QueueType::ccb,

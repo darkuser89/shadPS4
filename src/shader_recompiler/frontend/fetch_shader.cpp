@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "shader_recompiler/frontend/decode.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
+#include "video_core/amdgpu/guest_address.h"
 
 namespace Shader::Gcn {
 
@@ -40,9 +41,10 @@ static bool IsTypedBufferLoad(const Gcn::GcnInst& inst) {
 }
 
 const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base) {
-    const u32* code;
-    std::memcpy(&code, &info.user_data[sgpr_base], sizeof(code));
-    return code;
+    VAddr code_address{};
+    std::memcpy(&code_address, &info.user_data[sgpr_base], sizeof(code_address));
+    code_address &= 0xFFFFFFFFFFFFULL;
+    return AmdGpu::ResolveGuestAddressAs<const u32*>(code_address);
 }
 
 std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {

@@ -94,8 +94,9 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
         return size;
     }
 
+    virtual_addr = TranslateCanonicalGuestAddress(virtual_addr);
     std::shared_lock lk{mutex};
-    ASSERT_MSG(IsValidMapping(virtual_addr), "Attempted to access invalid address {:#x}",
+    ASSERT_MSG(IsValidMappingLocked(virtual_addr), "Attempted to access invalid address {:#x}",
                virtual_addr);
 
     // Clamp size to the remaining size of the current VMA.
@@ -137,8 +138,9 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
         return;
     }
 
+    virtual_addr = TranslateCanonicalGuestAddress(virtual_addr);
     std::shared_lock lk{mutex};
-    if (!IsValidMapping(virtual_addr, size)) {
+    if (!IsValidMappingLocked(virtual_addr, size)) {
         LOG_WARNING(Kernel_Vmm,
                     "CopySparseMemory: replacing invalid guest range with zeroes, addr={:#x}, "
                     "size={:#x}",
@@ -163,9 +165,13 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
 }
 
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
-    const VAddr virtual_addr = std::bit_cast<VAddr>(address);
+    // GPU command streams contain PS4 virtual addresses. Fixed guest mappings may live at a
+    // relocated host address on ARM64, so resolve the canonical address before consulting the
+    // host VMA and physical-backing maps.
+    const VAddr virtual_addr = TranslateCanonicalGuestAddress(std::bit_cast<VAddr>(address));
     std::shared_lock lk{mutex};
-    ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
+    ASSERT_MSG(IsValidMappingLocked(virtual_addr, size),
+               "Attempted to access invalid address {:#x}",
                virtual_addr);
 
     std::vector<VirtualMemoryArea> vmas_to_write;
@@ -377,7 +383,8 @@ s32 MemoryManager::PoolCommit(VAddr virtual_addr, u64 size, MemoryProt prot, s32
     std::scoped_lock lk{unmap_mutex};
     std::unique_lock lk2{mutex};
     virtual_addr = TranslateCanonicalGuestAddress(virtual_addr);
-    ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
+    ASSERT_MSG(IsValidMappingLocked(virtual_addr, size),
+               "Attempted to access invalid address {:#x}",
                virtual_addr);
 
     // Input addresses to PoolCommit are treated as fixed, and have a constant alignment.
@@ -512,48 +519,56 @@ MemoryManager::VMAHandle MemoryManager::CreateArea(VAddr virtual_addr, u64 size,
 
 VAddr MemoryManager::TranslateCanonicalGuestAddress(VAddr virtual_addr) {
 #if defined(ARCH_ARM64)
-    // On ARM64 hosts the whole guest space lives in one relocated linear
-    // region starting at SystemManagedVirtualBase(); macOS reserves everything
-    // below 0x7000000000 for the GPU carveout, so a canonical PS4 fixed
-    // address can never itself be a live mapping here. Games legitimately keep
-    // using the canonical constants they passed to a fixed *Reserve/Map call
-    // in later commit/protect/unmap/query calls, so apply the same linear
-    // shift RelocateFixedGuestAddress used when the mapping was created.
-    constexpr VAddr CanonicalSystemManagedBase = 0x400000;
-    constexpr VAddr CanonicalUserBase = 0x1000000000;
-    const VAddr relocated_base = impl.SystemManagedVirtualBase();
-    if (virtual_addr >= CanonicalUserBase && virtual_addr < relocated_base) {
-        const VAddr offset = virtual_addr - CanonicalSystemManagedBase;
-        if (offset <= std::numeric_limits<VAddr>::max() - relocated_base) {
-            const VAddr relocated_addr = relocated_base + offset;
-            LOG_DEBUG(Kernel_Vmm, "Translating canonical guest address {:#x} to {:#x}",
-                      virtual_addr, relocated_addr);
-            return relocated_addr;
-        }
+    if (virtual_addr >= CanonicalGuestRemapStart &&
+        virtual_addr < CanonicalGuestRemapEnd) {
+        const VAddr relocated_addr =
+            GuestMemoryRemapBase() + (virtual_addr - CanonicalGuestRemapStart);
+        LOG_DEBUG(Kernel_Vmm, "Translating canonical guest address {:#x} to {:#x}",
+                  virtual_addr, relocated_addr);
+        return relocated_addr;
     }
 #endif
     return virtual_addr;
 }
 
+VAddr MemoryManager::CanonicalizeGuestAddress(VAddr virtual_addr) {
+#if defined(ARCH_ARM64)
+    const VAddr relocated_base = GuestMemoryRemapBase();
+    if (virtual_addr >= relocated_base &&
+        virtual_addr < relocated_base + CanonicalGuestRemapSize) {
+        return CanonicalGuestRemapStart + (virtual_addr - relocated_base);
+    }
+#endif
+    return virtual_addr;
+}
+
+VAddr MemoryManager::GuestMemoryRemapBase() const {
+#if defined(ARCH_ARM64)
+    const VAddr remap_base = reinterpret_cast<VAddr>(impl.UserVirtualBase());
+    ASSERT_MSG(remap_base < 0x10000000000ULL &&
+                   CanonicalGuestRemapSize <= 0x10000000000ULL - remap_base,
+               "ARM64 canonical guest remap must remain inside the PS4 GPU's 40-bit address "
+               "space");
+    return remap_base;
+#else
+    return CanonicalGuestRemapStart;
+#endif
+}
+
 VAddr MemoryManager::RelocateFixedGuestAddress(VAddr virtual_addr, u64 size) {
 #if defined(ARCH_ARM64)
-    // Apple Silicon cannot reserve parts of the canonical PS4 address range. Preserve the guest
-    // mapping's relative offset in shadPS4's relocated ARM64 address space.
-    constexpr VAddr CanonicalSystemManagedBase = 0x400000;
-    constexpr VAddr CanonicalUserBase = 0x1000000000;
-    const VAddr relocated_base = impl.SystemManagedVirtualBase();
-    if (virtual_addr >= CanonicalUserBase && virtual_addr < relocated_base) {
-        const VAddr offset = virtual_addr - CanonicalSystemManagedBase;
-        if (offset <= std::numeric_limits<VAddr>::max() - relocated_base) {
-            const VAddr relocated_addr = relocated_base + offset;
-            if (IsValidMapping(relocated_addr, size)) {
-                LOG_INFO(Kernel_Vmm,
-                         "Relocating unavailable fixed guest mapping {:#x} - {:#x} to {:#x} - "
-                         "{:#x}",
-                         virtual_addr, virtual_addr + size, relocated_addr,
-                         relocated_addr + size);
-                return relocated_addr;
-            }
+    // Keep the unavailable canonical range in a dedicated host-only window. The previous linear
+    // relocation overlapped identity-mapped high guest ranges used by PS4 memory pools.
+    if (virtual_addr >= CanonicalGuestRemapStart &&
+        virtual_addr < CanonicalGuestRemapEnd &&
+        size <= CanonicalGuestRemapEnd - virtual_addr) {
+        const VAddr relocated_addr = TranslateCanonicalGuestAddress(virtual_addr);
+        if (IsValidMapping(relocated_addr, size)) {
+            LOG_INFO(Kernel_Vmm,
+                     "Relocating unavailable fixed guest mapping {:#x} - {:#x} to {:#x} - "
+                     "{:#x}",
+                     virtual_addr, virtual_addr + size, relocated_addr, relocated_addr + size);
+            return relocated_addr;
         }
     }
 #endif
@@ -605,7 +620,7 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
         }
     }
 
-    if (True(flags & MemoryMapFlags::Fixed) && !IsValidMapping(virtual_addr, size)) {
+    if (True(flags & MemoryMapFlags::Fixed)) {
         virtual_addr = RelocateFixedGuestAddress(virtual_addr, size);
     }
 
@@ -726,7 +741,10 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
         MergeAdjacent(vma_map, new_vma_handle);
     }
 
-    *out_addr = std::bit_cast<void*>(mapped_addr);
+    // The VMA stores the real ARM64 host address, but fixed mappings in the macOS carveout must
+    // remain canonical in the PS4 ABI. Returning the relocated backing address leaks a host
+    // pointer into guest allocators and breaks their address-range classification.
+    *out_addr = std::bit_cast<void*>(CanonicalizeGuestAddress(mapped_addr));
     if (type != VMAType::Reserved && type != VMAType::PoolReserved) {
         // Flexible address space mappings were performed while finding direct memory areas.
         if (type != VMAType::Flexible) {
@@ -788,7 +806,7 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
         prot &= ~MemoryProt::CpuExec;
     }
 
-    if (True(flags & MemoryMapFlags::Fixed) && !IsValidMapping(virtual_addr, size)) {
+    if (True(flags & MemoryMapFlags::Fixed)) {
         virtual_addr = RelocateFixedGuestAddress(virtual_addr, size);
     }
 
@@ -832,7 +850,7 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
 
     impl.MapFile(mapped_addr, size, phys_addr, std::bit_cast<u32>(prot), handle);
 
-    *out_addr = std::bit_cast<void*>(mapped_addr);
+    *out_addr = std::bit_cast<void*>(CanonicalizeGuestAddress(mapped_addr));
     return ORBIS_OK;
 }
 
@@ -1135,7 +1153,8 @@ s32 MemoryManager::Protect(VAddr addr, u64 size, MemoryProt prot) {
 
     // Ensure the range to modify is valid
     std::scoped_lock lk{mutex, unmap_mutex};
-    ASSERT_MSG(IsValidMapping(addr, size), "Attempted to access invalid address {:#x}", addr);
+    ASSERT_MSG(IsValidMappingLocked(addr, size), "Attempted to access invalid address {:#x}",
+               addr);
 
     // Appropriately restrict flags.
     constexpr static MemoryProt flag_mask =
@@ -1294,7 +1313,8 @@ s32 MemoryManager::DirectQueryAvailable(PAddr search_start, PAddr search_end, u6
 s32 MemoryManager::SetDirectMemoryType(VAddr addr, u64 size, s32 memory_type) {
     std::scoped_lock lk{mutex, unmap_mutex};
 
-    ASSERT_MSG(IsValidMapping(addr, size), "Attempted to access invalid address {:#x}", addr);
+    ASSERT_MSG(IsValidMappingLocked(addr, size), "Attempted to access invalid address {:#x}",
+               addr);
 
     // Search through all VMAs covered by the provided range.
     // We aren't modifying these VMAs, so it's safe to iterate through them.
@@ -1349,7 +1369,7 @@ void MemoryManager::NameVirtualRange(VAddr virtual_addr, u64 size, std::string_v
     // Addresses are aligned down to the nearest 16_KB
     VAddr aligned_addr = Common::AlignDown(virtual_addr, 16_KB);
 
-    ASSERT_MSG(IsValidMapping(aligned_addr, aligned_size),
+    ASSERT_MSG(IsValidMappingLocked(aligned_addr, aligned_size),
                "Attempted to access invalid address {:#x}", aligned_addr);
     auto it = FindVMA(aligned_addr);
     u64 remaining_size = aligned_size;
@@ -1402,7 +1422,7 @@ s32 MemoryManager::GetDirectMemoryType(PAddr addr, s32* directMemoryTypeOut,
 
 s32 MemoryManager::IsStack(VAddr addr, void** start, void** end) {
     std::shared_lock lk{mutex};
-    ASSERT_MSG(IsValidMapping(addr), "Attempted to access invalid address {:#x}", addr);
+    ASSERT_MSG(IsValidMappingLocked(addr), "Attempted to access invalid address {:#x}", addr);
     const auto& vma = FindVMA(addr)->second;
     if (vma.IsFree()) {
         return ORBIS_KERNEL_ERROR_EACCES;
@@ -1459,6 +1479,12 @@ VAddr MemoryManager::SearchFree(VAddr virtual_addr, u64 size, u32 alignment) {
     // Calculate the minimum and maximum addresses present in our address space.
     auto min_search_address = impl.SystemManagedVirtualBase();
     auto max_search_address = impl.UserVirtualBase() + impl.UserVirtualSize();
+#if defined(ARCH_ARM64)
+    // The beginning of the ARM64 user range is reserved for canonical fixed addresses. Keep
+    // ordinary flexible mappings below it so that the two guest address domains cannot alias.
+    // This also keeps all renderer-visible addresses inside the PS4 GPU's 40-bit address space.
+    max_search_address = GuestMemoryRemapBase();
+#endif
 
     // If the requested address is below the mapped range, start search from the lowest address
     if (virtual_addr < min_search_address) {
@@ -1476,7 +1502,8 @@ VAddr MemoryManager::SearchFree(VAddr virtual_addr, u64 size, u32 alignment) {
     auto it = FindVMA(virtual_addr);
 
     // If the VMA is free and contains the requested mapping we are done.
-    if (it->second.IsFree() && it->second.Contains(virtual_addr, size)) {
+    if (it->second.IsFree() && it->second.Contains(virtual_addr, size) &&
+        virtual_addr < max_search_address && size <= max_search_address - virtual_addr) {
         return virtual_addr;
     }
 
@@ -1505,7 +1532,8 @@ VAddr MemoryManager::SearchFree(VAddr virtual_addr, u64 size, u32 alignment) {
         }
 
         // If there's enough space in the VMA, return the address.
-        const u64 remaining_size = vma.base + vma.size - virtual_addr;
+        const u64 remaining_size =
+            std::min(vma.base + vma.size, max_search_address) - virtual_addr;
         if (remaining_size >= size) {
             return virtual_addr;
         }
@@ -1680,11 +1708,11 @@ namespace Core::CPU {
 
 u64 TranslateCanonicalGuestPointer(u64 guest_ptr) {
 #if defined(ARCH_ARM64)
-    // Only canonical carveout pointers (0x1000000000-0x6FFFFFFFFF) can ever be
+    // Only canonical carveout pointers can ever be
     // stale here, and only when they resolve to a live relocated mapping. This
     // keeps the check off the hot path for every ordinary pointer and never
     // rewrites an integer argument that merely looks address-like.
-    if (guest_ptr >= 0x1000000000ULL && guest_ptr < 0x7000000000ULL) {
+    if (guest_ptr >= CanonicalGuestRemapStart && guest_ptr < CanonicalGuestRemapEnd) {
         auto* memory = Core::Memory::Instance();
         const u64 relocated = memory->TranslateCanonicalGuestAddress(guest_ptr);
         if (relocated != guest_ptr && memory->IsValidMapping(relocated, 1)) {
@@ -1693,6 +1721,14 @@ u64 TranslateCanonicalGuestPointer(u64 guest_ptr) {
     }
 #endif
     return guest_ptr;
+}
+
+u64 CanonicalizeGuestPointer(u64 host_ptr) {
+#if defined(ARCH_ARM64)
+    return Core::Memory::Instance()->CanonicalizeGuestAddress(host_ptr);
+#else
+    return host_ptr;
+#endif
 }
 
 } // namespace Core::CPU

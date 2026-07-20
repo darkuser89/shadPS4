@@ -26,7 +26,10 @@ template <class T>
 u64 PackGuestCallbackArg(T&& value) {
     using Bare = std::remove_cvref_t<T>;
     if constexpr (std::is_pointer_v<Bare>) {
-        return reinterpret_cast<u64>(value);
+        // Native HLE code observes pointers in the translated host mapping.  A
+        // guest callback must observe the canonical PS4 address again; leaking
+        // the translated address corrupts pointer identity in guest allocators.
+        return CanonicalizeGuestPointer(reinterpret_cast<u64>(value));
     } else if constexpr (std::is_enum_v<Bare>) {
         return static_cast<u64>(static_cast<std::underlying_type_t<Bare>>(value));
     } else {
@@ -54,7 +57,9 @@ decltype(auto) InvokeGuestOrHost(Fn fn, Args&&... args) {
             if constexpr (std::is_void_v<Ret>) {
                 return;
             } else if constexpr (std::is_pointer_v<std::remove_cvref_t<Ret>>) {
-                return reinterpret_cast<Ret>(raw);
+                // The callback returns a canonical PS4 pointer.  Native HLE
+                // code must dereference the corresponding host mapping.
+                return reinterpret_cast<Ret>(TranslateCanonicalGuestPointer(raw));
             } else {
                 return static_cast<Ret>(raw);
             }

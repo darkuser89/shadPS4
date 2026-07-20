@@ -10,6 +10,7 @@
 #include "common/uint128.h"
 #include "core/libraries/gnmdriver/gnmdriver.h"
 #include "core/libraries/kernel/time.h"
+#include "video_core/amdgpu/guest_address.h"
 #include "video_core/amdgpu/pm4_opcodes.h"
 
 namespace AmdGpu {
@@ -682,7 +683,10 @@ struct PM4CmdWaitRegMem {
     }
 
     bool Test(std::span<const u32> regs) const {
-        u32 value = mem_space.Value() == MemSpace::Memory ? *Address() : regs[Reg()];
+        const VAddr guest_address = std::bit_cast<VAddr>(Address());
+        const u32 value = mem_space.Value() == MemSpace::Memory
+                              ? *ResolveGuestAddressAs<const u32*>(guest_address)
+                              : regs[Reg()];
         switch (function.Value()) {
         case Function::Always: {
             return true;
@@ -935,21 +939,24 @@ struct PM4CmdReleaseMem {
     }
 
     void SignalFence(auto&& signal_irq, auto&& gds_to_mem) const {
+        const VAddr guest_address = std::bit_cast<VAddr>(Address<void*>());
+        auto* const host_u32 = ResolveGuestAddressAs<u32*>(guest_address);
+        auto* const host_u64 = ResolveGuestAddressAs<u64*>(guest_address);
         switch (data_sel.Value()) {
         case DataSelect::Data32Low: {
-            *Address<u32*>() = DataDWord();
+            *host_u32 = DataDWord();
             break;
         }
         case DataSelect::Data64: {
-            *Address<u64*>() = DataQWord();
+            *host_u64 = DataQWord();
             break;
         }
         case DataSelect::GpuClock64: {
-            *Address<u64*>() = GetGpuClock64();
+            *host_u64 = GetGpuClock64();
             break;
         }
         case DataSelect::PerfCounter: {
-            *Address<u64*>() = GetGpuPerfCounter();
+            *host_u64 = GetGpuPerfCounter();
             break;
         }
         case DataSelect::GdsMemStore: {

@@ -14,6 +14,7 @@
 #include "common/path_util.h"
 #include "common/signal_context.h"
 #include "core/emulator_settings.h"
+#include "core/memory.h"
 #include "core/signals.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/breadth_first_search.h"
@@ -384,11 +385,28 @@ static void EmitAddress(ARMEmitter::Emitter& c, ARMEmitter::XRegister base, u64 
     c.add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r9, base.R(), ARMEmitter::Reg::r9);
 }
 
+static void TranslateSrtPointer(ARMEmitter::Emitter& c, ARMEmitter::XRegister pointer) {
+    // SRT entries contain PS4 virtual addresses. On ARM64 the canonical carveout is relocated,
+    // so generated host code must translate a loaded pointer before following it. Test the
+    // complete range with one unsigned comparison: (pointer - start) < size.
+    EmitMovImmediate(c, ARMEmitter::XReg::x9, Core::CanonicalGuestRemapStart);
+    c.sub(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r10, pointer.R(), ARMEmitter::Reg::r9);
+    EmitMovImmediate(c, ARMEmitter::XReg::x9, Core::CanonicalGuestRemapSize);
+    c.cmp(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r10, ARMEmitter::Reg::r9);
+    EmitMovImmediate(c, ARMEmitter::XReg::x9,
+                     Core::Memory::Instance()->GuestMemoryRemapBase());
+    c.add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r10, ARMEmitter::Reg::r10,
+          ARMEmitter::Reg::r9);
+    c.csel(ARMEmitter::Size::i64Bit, pointer.R(), ARMEmitter::Reg::r10, pointer.R(),
+           ARMEmitter::Condition::CC_LO);
+}
+
 static inline void PushPtr(ARMEmitter::Emitter& c, u32 off_dw) {
     c.str<ARMEmitter::IndexType::PRE>(ARMEmitter::XReg::x0, ARMEmitter::Reg::rsp, -16);
     EmitAddress(c, ARMEmitter::XReg::x0, static_cast<u64>(off_dw) << 2);
     c.ldr(ARMEmitter::XReg::x0, ARMEmitter::Reg::r9, 0);
     c.ubfx(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r0, ARMEmitter::Reg::r0, 0, 48);
+    TranslateSrtPointer(c, ARMEmitter::XReg::x0);
 }
 
 static inline void PopPtr(ARMEmitter::Emitter& c) {

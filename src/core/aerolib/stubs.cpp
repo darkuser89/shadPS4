@@ -6,6 +6,7 @@
 #include "core/aerolib/aerolib.h"
 #include "core/aerolib/stubs.h"
 #if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
+#include <deque>
 #include "core/cpu/fex_hle.h"
 #endif
 
@@ -48,27 +49,40 @@ static u64 CommonStub(int stub_index, void* addr) {
 
 #if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
 // Aerolib fallbacks are selected dynamically, so they cannot use the normal
-// compile-time HleThunkT wrapper. Each tiny guest stub loads its slot index in
-// EDI and then enters this shared FEX thunk. FEX spills the guest registers
-// before calling us and pops the guest return address after we return.
-static void CommonFexStub(void*) {
-    const u64 index = Core::CPU::g_fex_guest_gregs[Core::CPU::FEX_RDI];
+// compile-time HleThunkT wrapper. Keep stable metadata for every generated
+// guest stub instead of sharing the fixed-size native template table.
+struct FexStubMetadata {
+    const NidEntry* entry{};
+    std::string unknown_nid;
+};
+
+static std::deque<FexStubMetadata> fex_stub_metadata;
+
+static void CommonFexStub(void* metadata_ptr) {
+    const auto& metadata = *static_cast<const FexStubMetadata*>(metadata_ptr);
     const u64 rsp = Core::CPU::g_fex_guest_gregs[Core::CPU::FEX_RSP];
     const auto guest_return = *reinterpret_cast<void* const*>(rsp);
-    Core::CPU::g_fex_guest_gregs[Core::CPU::FEX_RAX] =
-        index < MAX_STUBS ? CommonStub(static_cast<int>(index), guest_return) : UnknownStub();
+    if (metadata.entry) {
+        LOG_ERROR(Core, "Stub: {} (nid: {}) called, returning zero to {}", metadata.entry->name,
+                  metadata.entry->nid, guest_return);
+    } else {
+        LOG_ERROR(Core, "Stub: Unknown (nid: {}) called, returning zero to {}",
+                  metadata.unknown_nid, guest_return);
+    }
+    Core::CPU::g_fex_guest_gregs[Core::CPU::FEX_RAX] = 0;
 }
 
-static u64 MakeFexStub(u32 index) {
-    // mov edi, imm32; 0f 3f; 32-byte FEX thunk field
-    auto* code = Core::CPU::StubArenaAlloc(39);
-    code[0] = 0xBF;
-    std::memcpy(code + 1, &index, sizeof(index));
-    code[5] = 0x0F;
-    code[6] = 0x3F;
-    std::memset(code + 7, 0, 32);
+static u64 MakeFexStub(const FexStubMetadata* metadata) {
+    // movabs rdi, metadata; 0f 3f; 32-byte FEX thunk field
+    auto* code = Core::CPU::StubArenaAlloc(44);
+    code[0] = 0x48;
+    code[1] = 0xBF;
+    std::memcpy(code + 2, &metadata, sizeof(metadata));
+    code[10] = 0x0F;
+    code[11] = 0x3F;
+    std::memset(code + 12, 0, 32);
     auto* thunk = &CommonFexStub;
-    std::memcpy(code + 7, &thunk, sizeof(thunk));
+    std::memcpy(code + 12, &thunk, sizeof(thunk));
     return reinterpret_cast<u64>(code);
 }
 #endif
@@ -87,12 +101,16 @@ constexpr auto stub_handlers = MakeStubArray(std::make_index_sequence<MAX_STUBS>
 static u32 UsedStubEntries;
 
 u64 GetStub(const char* nid) {
-    if (UsedStubEntries >= MAX_STUBS) {
 #if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
-        return MakeFexStub(MAX_STUBS);
+    auto& metadata = fex_stub_metadata.emplace_back();
+    metadata.entry = FindByNid(nid);
+    if (!metadata.entry) {
+        metadata.unknown_nid = nid;
+    }
+    return MakeFexStub(&metadata);
 #else
+    if (UsedStubEntries >= MAX_STUBS) {
         return (u64)&UnknownStub;
-#endif
     }
 
     const auto entry = FindByNid(nid);
@@ -103,9 +121,6 @@ u64 GetStub(const char* nid) {
     }
 
     const u32 index = UsedStubEntries++;
-#if defined(ARCH_ARM64) && defined(SHAD_ENABLE_FEX)
-    return MakeFexStub(index);
-#else
     return reinterpret_cast<u64>(stub_handlers[index]);
 #endif
 }

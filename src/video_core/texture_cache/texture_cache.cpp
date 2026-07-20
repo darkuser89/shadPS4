@@ -641,18 +641,14 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     image.usage.render_target = 1u;
     UpdateImage(image_id);
 
-    // Register meta data for this color buffer
-    if (desc.info.meta_info.cmask_addr) {
-        surface_metas.emplace(desc.info.meta_info.cmask_addr,
-                              MetaDataInfo{.type = MetaDataInfo::Type::CMask});
-        image.info.meta_info.cmask_addr = desc.info.meta_info.cmask_addr;
-    }
-
-    if (desc.info.meta_info.fmask_addr) {
-        surface_metas.emplace(desc.info.meta_info.fmask_addr,
-                              MetaDataInfo{.type = MetaDataInfo::Type::FMask});
-        image.info.meta_info.fmask_addr = desc.info.meta_info.fmask_addr;
-    }
+    // Metadata can be switched off or rebound while the image stays cached. Keep the runtime
+    // registry in sync even when the new address is zero.
+    ReplaceMetaBinding(image.meta_bindings.cmask_addr, image.meta_bindings.retired,
+                       desc.info.meta_info.cmask_addr, MetaDataInfo::Type::CMask, image_id,
+                       image.image_uid);
+    ReplaceMetaBinding(image.meta_bindings.fmask_addr, image.meta_bindings.retired,
+                       desc.info.meta_info.fmask_addr, MetaDataInfo::Type::FMask, image_id,
+                       image.image_uid);
 
     return image.FindView(desc.view_info, false);
 }
@@ -663,13 +659,10 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
     image.usage.depth_target = 1u;
     UpdateImage(image_id);
 
-    // Register meta data for this depth buffer
-    if (desc.info.meta_info.htile_addr) {
-        surface_metas.emplace(desc.info.meta_info.htile_addr,
-                              MetaDataInfo{.type = MetaDataInfo::Type::HTile,
-                                           .clear_mask = image.info.meta_info.htile_clear_mask});
-        image.info.meta_info.htile_addr = desc.info.meta_info.htile_addr;
-    }
+    // HTile can change independently of the cached depth image as well.
+    ReplaceMetaBinding(image.meta_bindings.htile_addr, image.meta_bindings.retired,
+                       desc.info.meta_info.htile_addr, MetaDataInfo::Type::HTile, image_id,
+                       image.image_uid, image.info.meta_info.htile_clear_mask);
 
     // If there is a stencil attachment, link depth and stencil.
     if (desc.info.stencil_addr != 0) {
@@ -1066,22 +1059,84 @@ void TextureCache::TouchImage(const Image& image) {
     lru_cache.Touch(image.lru_id, gc_tick);
 }
 
+void TextureCache::ReplaceMetaBinding(VAddr& current_address, const bool& is_retired,
+                                      VAddr new_address, MetaDataInfo::Type type, ImageId owner_id,
+                                      u64 owner_uid, s32 initial_clear_mask) {
+    std::scoped_lock lock{surface_metas_mutex};
+    if (is_retired || current_address == new_address) {
+        return;
+    }
+
+    if (current_address != 0) {
+        auto old = surface_metas.find(current_address);
+        if (old != surface_metas.end()) {
+            auto& owners = old.value().owners;
+            for (auto owner = owners.begin(); owner != owners.end(); ++owner) {
+                if (owner->Matches(type, owner_id, owner_uid)) {
+                    owners.erase(owner);
+                    break;
+                }
+            }
+            if (owners.empty()) {
+                surface_metas.erase(old);
+            }
+        }
+    }
+    current_address = new_address;
+
+    if (new_address == 0) {
+        return;
+    }
+
+    auto [current, inserted] = surface_metas.try_emplace(new_address);
+    auto& meta = current.value();
+    if (inserted) {
+        meta.clear_mask = initial_clear_mask;
+    }
+    if (!meta.HasOwner(type, owner_id, owner_uid)) {
+        meta.owners.push_back(
+            MetaDataInfo::Owner{.type = type, .image_id = owner_id, .image_uid = owner_uid});
+    }
+}
+
+void TextureCache::UnregisterMetaBindings(Image& image, ImageId owner_id) {
+    std::scoped_lock lock{surface_metas_mutex};
+    auto& bindings = image.meta_bindings;
+    bindings.retired = true;
+
+    const auto unregister = [&](VAddr& address, MetaDataInfo::Type type) {
+        if (address == 0) {
+            return;
+        }
+
+        auto it = surface_metas.find(address);
+        if (it != surface_metas.end()) {
+            auto& owners = it.value().owners;
+            for (auto owner = owners.begin(); owner != owners.end(); ++owner) {
+                if (owner->Matches(type, owner_id, image.image_uid)) {
+                    owners.erase(owner);
+                    break;
+                }
+            }
+            if (owners.empty()) {
+                surface_metas.erase(it);
+            }
+        }
+        address = 0;
+    };
+
+    unregister(bindings.cmask_addr, MetaDataInfo::Type::CMask);
+    unregister(bindings.fmask_addr, MetaDataInfo::Type::FMask);
+    unregister(bindings.htile_addr, MetaDataInfo::Type::HTile);
+}
+
 void TextureCache::DeleteImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     ASSERT_MSG(!image.IsTracked(), "Image was not untracked");
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");
 
-    // Remove any registered meta areas.
-    const auto& meta_info = image.info.meta_info;
-    if (meta_info.cmask_addr) {
-        surface_metas.erase(meta_info.cmask_addr);
-    }
-    if (meta_info.fmask_addr) {
-        surface_metas.erase(meta_info.fmask_addr);
-    }
-    if (meta_info.htile_addr) {
-        surface_metas.erase(meta_info.htile_addr);
-    }
+    // Remove all metadata owners atomically and prevent a racing rebind from reviving the image.
+    UnregisterMetaBindings(image, image_id);
 
     {
         std::unique_lock lk{download_images_mutex};

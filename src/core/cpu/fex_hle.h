@@ -43,6 +43,11 @@ extern thread_local const char* g_current_fex_hle_signature;
 // canonical address. Defined in memory.cpp; a no-op on non-ARM64 hosts.
 u64 TranslateCanonicalGuestPointer(u64 guest_ptr);
 
+// Inverse of TranslateCanonicalGuestPointer for pointer-valued HLE returns. Native helpers such
+// as memcpy return the translated host destination; the guest must continue to observe its
+// canonical PS4 pointer instead of leaking the ARM64 backing address into guest allocator state.
+u64 CanonicalizeGuestPointer(u64 host_ptr);
+
 // gregs[] indices (FEXCore X86State order).
 enum : int {
     FEX_RAX = 0,
@@ -57,6 +62,8 @@ enum : int {
 };
 inline constexpr int kFexSysvArg[6] = {FEX_RDI, FEX_RSI, FEX_RDX, FEX_RCX, FEX_R8, FEX_R9};
 
+// Return address currently stored on the guest x86 stack while an HLE thunk is
+// executing. This identifies the guest call site without altering CPU state.
 template <class T>
 using HleBareT = std::remove_cv_t<std::remove_reference_t<T>>;
 
@@ -140,9 +147,9 @@ void WriteHleReturn(Ret&& value) {
             g_fex_guest_xmm[0] = bits;
         }
     } else if constexpr (std::is_reference_v<Ret>) {
-        g_fex_guest_gregs[FEX_RAX] = reinterpret_cast<u64>(&value);
+        g_fex_guest_gregs[FEX_RAX] = CanonicalizeGuestPointer(reinterpret_cast<u64>(&value));
     } else if constexpr (std::is_pointer_v<Bare>) {
-        g_fex_guest_gregs[FEX_RAX] = reinterpret_cast<u64>(value);
+        g_fex_guest_gregs[FEX_RAX] = CanonicalizeGuestPointer(reinterpret_cast<u64>(value));
     } else {
         g_fex_guest_gregs[FEX_RAX] = static_cast<u64>(value);
     }

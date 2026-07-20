@@ -5,6 +5,7 @@
 
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include "common/enum.h"
@@ -27,6 +28,13 @@ class MemoryMapViewer;
 }
 
 namespace Core {
+
+// Apple reserves this part of the PS4 user address space for its GPU. ARM64 hosts keep the
+// guest-visible values canonical and place their backing in a separate host-only range.
+inline constexpr VAddr CanonicalGuestRemapStart = 0x1000000000ULL;
+inline constexpr VAddr CanonicalGuestRemapEnd = 0x7000000000ULL;
+inline constexpr u64 CanonicalGuestRemapSize =
+    CanonicalGuestRemapEnd - CanonicalGuestRemapStart;
 
 constexpr u64 DEFAULT_MAPPING_BASE = 0x200000000;
 
@@ -200,40 +208,9 @@ public:
     }
 
     bool IsValidMapping(const VAddr virtual_addr, const u64 size = 0) {
-        const auto end_it = std::prev(vma_map.end());
-        const VAddr end_addr = end_it->first + end_it->second.size;
-
-        // If the address fails boundary checks, return early.
-        if (virtual_addr < vma_map.begin()->first || virtual_addr >= end_addr) {
-            return false;
-        }
-
-        // If size is zero and boundary checks succeed, then skip more robust checking
-        if (size == 0) {
-            return true;
-        }
-
-        // Now make sure the full address range is contained in vma_map.
-        auto vma_handle = FindVMA(virtual_addr);
-        auto addr_to_check = virtual_addr;
-        u64 size_to_validate = size;
-        while (vma_handle != vma_map.end() && size_to_validate > 0) {
-            const auto offset_in_vma = addr_to_check - vma_handle->second.base;
-            const auto size_in_vma =
-                std::min<u64>(vma_handle->second.size - offset_in_vma, size_to_validate);
-            size_to_validate -= size_in_vma;
-            addr_to_check += size_in_vma;
-            vma_handle++;
-
-            // Make sure there isn't any gap here
-            if (size_to_validate > 0 && vma_handle != vma_map.end() &&
-                addr_to_check != vma_handle->second.base) {
-                return false;
-            }
-        }
-
-        // If we reach this point and size to validate is not positive, then this mapping is valid.
-        return size_to_validate <= 0;
+        const VAddr host_addr = TranslateCanonicalGuestAddress(virtual_addr);
+        std::shared_lock lk{mutex};
+        return IsValidMappingLocked(host_addr, size);
     }
 
     u64 ClampRangeSize(VAddr virtual_addr, u64 size);
@@ -244,7 +221,8 @@ public:
 
     bool TryWriteBacking(void* address, const void* data, u64 size);
 
-    void SetupMemoryRegions(u64 flexible_size, bool use_extended_mem1, bool use_extended_mem2);
+    void SetupMemoryRegions(u64 flexible_size, bool use_extended_mem1,
+                            bool use_extended_mem2);
 
     PAddr PoolExpand(PAddr search_start, PAddr search_end, u64 size, u64 alignment);
 
@@ -297,7 +275,54 @@ public:
     // Public because the FEX fault handler emulates carveout accesses through it.
     VAddr TranslateCanonicalGuestAddress(VAddr virtual_addr);
 
+    // Converts an address in the relocated ARM64 mapping back to the canonical
+    // address observed by PS4 code. Identity on hosts without relocation.
+    VAddr CanonicalizeGuestAddress(VAddr virtual_addr);
+
+    // Host base dedicated to the canonical carveout above. It is deliberately kept separate
+    // from identity-mapped high PS4 addresses such as Unreal Engine memory pools.
+    VAddr GuestMemoryRemapBase() const;
+
 private:
+    // The VMA tree is rewritten by mapping, unmapping and pool operations. Callers of this
+    // helper must already hold `mutex` for reading or writing; the public wrapper above is the
+    // safe entry point for code outside MemoryManager's locked sections.
+    bool IsValidMappingLocked(const VAddr virtual_addr, const u64 size = 0) {
+        const auto end_it = std::prev(vma_map.end());
+        const VAddr end_addr = end_it->first + end_it->second.size;
+
+        // If the address fails boundary checks, return early.
+        if (virtual_addr < vma_map.begin()->first || virtual_addr >= end_addr) {
+            return false;
+        }
+
+        // If size is zero and boundary checks succeed, then skip more robust checking
+        if (size == 0) {
+            return true;
+        }
+
+        // Now make sure the full address range is contained in vma_map.
+        auto vma_handle = FindVMA(virtual_addr);
+        auto addr_to_check = virtual_addr;
+        u64 size_to_validate = size;
+        while (vma_handle != vma_map.end() && size_to_validate > 0) {
+            const auto offset_in_vma = addr_to_check - vma_handle->second.base;
+            const auto size_in_vma =
+                std::min<u64>(vma_handle->second.size - offset_in_vma, size_to_validate);
+            size_to_validate -= size_in_vma;
+            addr_to_check += size_in_vma;
+            vma_handle++;
+
+            // Make sure there isn't any gap here
+            if (size_to_validate > 0 && vma_handle != vma_map.end() &&
+                addr_to_check != vma_handle->second.base) {
+                return false;
+            }
+        }
+
+        // If we reach this point and size to validate is not positive, then this mapping is valid.
+        return size_to_validate <= 0;
+    }
     VMAHandle FindVMA(VAddr target) {
         return std::prev(vma_map.upper_bound(target));
     }

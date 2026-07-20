@@ -93,9 +93,11 @@ struct PendingGuestSignal {
     VAddr fault_address{};
     VAddr host_pc{};
     bool was_in_jit{};
+    bool resume_state_valid{};
     sigset_t saved_signal_mask{};
     DarwinMcontext saved_mcontext{};
     std::array<std::byte, sizeof(FEXCore::Core::CPUState)> saved_cpu_state{};
+    std::array<std::byte, sizeof(FEXCore::Core::CPUState)> resume_cpu_state{};
     Libraries::Kernel::Ucontext orbis_context{};
 };
 
@@ -267,6 +269,20 @@ struct FexBackend::Impl {
         size_t size;
     };
 
+    // Guest code that walks the conventional x86-64 RBP chain expects the
+    // outermost frame to contain both a null previous-frame pointer and a null
+    // return address. A translated thread has no native x86 caller to provide
+    // that frame, so install the ABI boundary explicitly. The actual entry
+    // return address remains immediately below this frame.
+    static VAddr InstallRootFrame(VAddr aligned_stack_top) {
+        ASSERT((aligned_stack_top & 0xF) == 0);
+        const VAddr root_frame = aligned_stack_top - 2 * sizeof(u64);
+        auto* words = reinterpret_cast<u64*>(root_frame);
+        words[0] = 0;
+        words[1] = 0;
+        return root_frame;
+    }
+
     // Configure a freshly created guest thread's segment/mode/return-stack state.
     // These four items are all mandatory and were each isolated in the harness.
     CallRetAllocation SetupThread(FEXCore::Core::InternalThreadState* thread, VAddr rip) {
@@ -426,6 +442,21 @@ bool FexBackend::Initialize() {
     impl->syscalls = fextl::make_unique<Ps4SyscallHandler>();
     impl->ctx->SetSignalDelegator(impl->signals.get());
     impl->ctx->SetSyscallHandler(impl->syscalls.get());
+#if defined(__APPLE__) && defined(__aarch64__)
+    // macOS reserves the PS4's canonical 0x10-0x6f billion user interval for
+    // Apple GPU mappings. Keep guest pointers canonical and translate only
+    // FEX JIT data accesses to shadPS4's linear relocated mapping. This avoids
+    // handling every load/store through SIGSEGV.
+    auto* memory = Core::Memory::Instance();
+    const uint64_t relocated_start = memory->GuestMemoryRemapBase();
+    const int64_t relocation_delta = static_cast<int64_t>(
+        relocated_start - Core::CanonicalGuestRemapStart);
+    impl->ctx->SetGuestMemoryAddressRemap(Core::CanonicalGuestRemapStart,
+                                         Core::CanonicalGuestRemapEnd, relocation_delta);
+    LOG_INFO(Core_Linker, "FEXCore canonical guest remap: {:#x}-{:#x} -> {:#x}-{:#x}",
+             Core::CanonicalGuestRemapStart, Core::CanonicalGuestRemapEnd, relocated_start,
+             relocated_start + Core::CanonicalGuestRemapSize);
+#endif
     impl->ctx->SetThunkHandler(&impl->thunks); // HLE guest->native boundary (0F 3F stubs)
     impl->ctx->SetHardwareTSOSupport(false);
     LOG_INFO(Core_Linker, "FEXCore memory model: software TSO (macOS barrier mode)");
@@ -498,10 +529,12 @@ u64 FexBackend::CallGuestFunction(VAddr entry_addr, u64 a0, u64 a1, u64 a2) {
     auto& s = impl->thread->CurrentFrame->State;
 
     // Push the HLT sentinel as the return address, then set args (SysV) and RIP.
-    uint64_t rsp = impl->guest_stack_top;
+    const VAddr root_frame = impl->InstallRootFrame(impl->guest_stack_top);
+    uint64_t rsp = root_frame;
     rsp -= 8;
     *reinterpret_cast<uint64_t*>(rsp) = impl->sentinel;
     s.gregs[FEXCore::X86State::REG_RSP] = rsp;
+    s.gregs[FEXCore::X86State::REG_RBP] = root_frame;
     s.gregs[FEXCore::X86State::REG_RDI] = a0;
     s.gregs[FEXCore::X86State::REG_RSI] = a1;
     s.gregs[FEXCore::X86State::REG_RDX] = a2;
@@ -521,7 +554,9 @@ u64 FexBackend::RunGuestThread(VAddr entry_addr, u64 arg, VAddr guest_stack_base
         UNREACHABLE_MSG("Failed to initialize FEXCore for guest thread {:#x}", entry_addr);
     }
 
-    uint64_t rsp = (guest_stack_base + guest_stack_size) & ~uint64_t(15);
+    const VAddr stack_top = (guest_stack_base + guest_stack_size) & ~uint64_t(15);
+    const VAddr root_frame = impl->InstallRootFrame(stack_top);
+    uint64_t rsp = root_frame;
     rsp -= 8;
     *reinterpret_cast<uint64_t*>(rsp) = impl->sentinel;
 
@@ -530,7 +565,11 @@ u64 FexBackend::RunGuestThread(VAddr entry_addr, u64 arg, VAddr guest_stack_base
     const auto callret = impl->SetupThread(guest_thread, entry_addr);
     auto& state = guest_thread->CurrentFrame->State;
     state.gregs[FEXCore::X86State::REG_RSP] = rsp;
-    state.gregs[FEXCore::X86State::REG_RDI] = arg;
+    state.gregs[FEXCore::X86State::REG_RBP] = root_frame;
+    // pthread HLE receives pointer arguments in their translated host form so
+    // native code can dereference them.  The x86-64 thread entry is guest code
+    // again and must observe the canonical PS4 pointer value.
+    state.gregs[FEXCore::X86State::REG_RDI] = CanonicalizeGuestPointer(arg);
     impl->ResetCallRetStack(guest_thread);
 
     impl->BeginExecution(guest_thread, guest_stack_base, guest_stack_size);
@@ -583,7 +622,6 @@ u64 FexBackend::RunGuestThread(VAddr entry_addr, u64 arg, VAddr guest_stack_base
         Common::Log::Flush();
     }
     impl->EndExecution(guest_thread);
-
     impl->ctx->DestroyThread(guest_thread);
     ::munmap(callret.mapping, callret.size);
     return result;
@@ -612,11 +650,11 @@ u64 FexBackend::CallGuestCallback(VAddr entry_addr, std::span<const u64> args) {
         }
         const size_t stack_arg_count =
             args.size() > ArgRegs.size() ? args.size() - ArgRegs.size() : 0;
-        // HandleCallback pushes CALLBACKRET at old RSP-8. Under the x86-64 SysV ABI the first
-        // overflow argument must therefore start at old RSP, so that it is at callback RSP+8.
-        // Writing it at old RSP-8 both collides with CALLBACKRET and shifts every stack argument.
+        // FEX reserves 16 bytes below the paused RSP and places CALLBACKRET in the lower slot.
+        // At guest entry RSP therefore equals old RSP-16, so the first x86-64 SysV overflow
+        // argument belongs in the upper slot at callback RSP+8 (old RSP-8).
         auto* callback_stack_args =
-            reinterpret_cast<u64*>(state.gregs[FEXCore::X86State::REG_RSP]);
+            reinterpret_cast<u64*>(state.gregs[FEXCore::X86State::REG_RSP] - sizeof(u64));
         std::vector<u64> saved_stack(callback_stack_args, callback_stack_args + stack_arg_count);
         for (size_t i = 0; i < stack_arg_count; ++i) {
             callback_stack_args[i] = args[ArgRegs.size() + i];
@@ -644,7 +682,8 @@ u64 FexBackend::CallGuestCallback(VAddr entry_addr, std::span<const u64> args) {
     const size_t stack_arg_count = args.size() > ArgRegs.size() ? args.size() - ArgRegs.size() : 0;
     const uint64_t stack_top =
         (reinterpret_cast<uint64_t>(callback_stack) + CallbackStackSize) & ~uint64_t(15);
-    uint64_t rsp = stack_top - (stack_arg_count + 1) * sizeof(u64);
+    const VAddr root_frame = impl->InstallRootFrame(stack_top);
+    uint64_t rsp = root_frame - (stack_arg_count + 1) * sizeof(u64);
     if ((rsp & 15) != 8) {
         rsp -= sizeof(u64);
     }
@@ -659,6 +698,7 @@ u64 FexBackend::CallGuestCallback(VAddr entry_addr, std::span<const u64> args) {
     const auto callret = impl->SetupThread(callback_thread, entry_addr);
     auto& state = callback_thread->CurrentFrame->State;
     state.gregs[FEXCore::X86State::REG_RSP] = rsp;
+    state.gregs[FEXCore::X86State::REG_RBP] = root_frame;
     for (size_t i = 0; i < std::min(args.size(), ArgRegs.size()); ++i) {
         state.gregs[ArgRegs[i]] = args[i];
     }
@@ -730,6 +770,7 @@ bool FexBackend::QueueGuestSignal(VAddr handler, u64 orbis_signum, s32 native_si
     pending.fault_address = fault_address;
     pending.host_pc = host_pc;
     pending.was_in_jit = was_in_jit;
+    pending.resume_state_valid = false;
     pending.saved_signal_mask = raw_context->uc_sigmask;
     std::memcpy(&pending.saved_mcontext, raw_context->uc_mcontext, sizeof(pending.saved_mcontext));
     std::memcpy(pending.saved_cpu_state.data(), &state, sizeof(state));
@@ -804,6 +845,12 @@ void FexBackend::DispatchPendingGuestSignal() {
     ctx.uc_mcontext.mc_fsbase = guest.fs;
     ctx.uc_mcontext.mc_rip = guest.rip;
     ctx.uc_mcontext.mc_addr = pending.fault_address;
+
+    // The pause trampoline has now spilled the live JIT registers into CPUState.
+    // Keep this architectural snapshot as the safe resume point in case the
+    // signal callback rotates the shared JIT code-buffer generation.
+    std::memcpy(pending.resume_cpu_state.data(), &state, sizeof(state));
+    pending.resume_state_valid = true;
 
     InvokeGuestSignalHandler(pending.handler, pending.orbis_signum, &ctx);
     pending.phase = PendingSignalReturning;
@@ -926,7 +973,8 @@ bool FexBackend::HandleAccessViolation(void* context, void* fault_address) {
     // memory manager actually mapped — the same linear shift used by
     // MemoryManager::TranslateCanonicalGuestAddress.
     const auto fault_va = reinterpret_cast<u64>(fault_address);
-    if (in_valid_jit_code && fault_va >= 0x1000000000ULL && fault_va < 0x7000000000ULL) {
+    if (in_valid_jit_code && fault_va >= Core::CanonicalGuestRemapStart &&
+        fault_va < Core::CanonicalGuestRemapEnd) {
         auto* memory = Core::Memory::Instance();
         const u64 relocated = memory->TranslateCanonicalGuestAddress(fault_va);
         if (relocated != fault_va && memory->IsValidMapping(relocated, 1)) {
@@ -1076,8 +1124,8 @@ bool FexBackend::HandleAccessViolation(void* context, void* fault_address) {
     // A carveout access that reached here means the memory manager had no
     // relocated mapping for it (the pool was never reserved, or the encoding is
     // unsupported); the specific reason was already logged above.
-    if (reinterpret_cast<u64>(fault_address) >= 0x1000000000ULL &&
-        reinterpret_cast<u64>(fault_address) < 0x7000000000ULL) {
+    if (reinterpret_cast<u64>(fault_address) >= Core::CanonicalGuestRemapStart &&
+        reinterpret_cast<u64>(fault_address) < Core::CanonicalGuestRemapEnd) {
         LOG_CRITICAL(Core_Linker,
                      "Unhandled guest access to canonical PS4 address {:#x} in the macOS GPU "
                      "carveout (0x1000000000-0x6FFFFFFFFF); see INTEGRATION.md (CUSA32809).",
@@ -1099,6 +1147,30 @@ bool FexBackend::HandleIllegalInstruction(void* context) {
         pending.phase == PendingSignalReturning) {
         auto* raw_context = static_cast<ucontext_t*>(context);
         auto* frame = g_current_fex_thread->CurrentFrame;
+
+        const bool resume_host_pc_is_current =
+            !pending.was_in_jit ||
+            impl->ctx->IsAddressInCurrentCodeBuffer(g_current_fex_thread, pending.host_pc);
+
+        if (!resume_host_pc_is_current && pending.resume_state_valid) {
+            // A guest signal callback may compile enough code to rotate FEX's
+            // shared code buffer. The interrupted generation is retained while
+            // the handler runs, but resuming it directly after dropping the
+            // signal reference would leave host return addresses pointing into
+            // reclaimable memory. Restore the spilled guest state and re-enter
+            // through the current dispatcher generation instead.
+            std::memcpy(&frame->State, pending.resume_cpu_state.data(), sizeof(frame->State));
+            impl->ResetCallRetStack(g_current_fex_thread);
+
+            auto& host = raw_context->uc_mcontext->__ss;
+            host.__x[1] = 0; // do not request a single-instruction dispatcher entry
+            host.__x[28] = reinterpret_cast<u64>(frame);
+            host.__pc = frame->Pointers.DispatcherLoopTopFillSRA;
+            raw_context->uc_sigmask = pending.saved_signal_mask;
+            --frame->SignalHandlerRefCounter;
+            pending.phase = PendingSignalIdle;
+            return true;
+        }
 
         std::memcpy(&frame->State, pending.saved_cpu_state.data(), sizeof(frame->State));
         std::memcpy(raw_context->uc_mcontext, &pending.saved_mcontext,
@@ -1151,7 +1223,8 @@ void FexBackend::RunMainThread(VAddr entry_addr, EntryParams* params, void* exit
     auto& s = impl->thread->CurrentFrame->State;
 
     // Mirror the PS4 kernel entry stack layout the x86 path builds by hand.
-    uint64_t rsp = impl->guest_stack_top;
+    const VAddr root_frame = impl->InstallRootFrame(impl->guest_stack_top);
+    uint64_t rsp = root_frame;
     rsp -= 8; // videoout_basic expects the stack misaligned, as in the x86 path
     const uint64_t* pw = reinterpret_cast<const uint64_t*>(params);
     rsp -= 8;
@@ -1162,6 +1235,7 @@ void FexBackend::RunMainThread(VAddr entry_addr, EntryParams* params, void* exit
     s.gregs[FEXCore::X86State::REG_RDI] = reinterpret_cast<uint64_t>(params);
     s.gregs[FEXCore::X86State::REG_RSI] = reinterpret_cast<uint64_t>(exit_func);
     s.gregs[FEXCore::X86State::REG_RSP] = rsp;
+    s.gregs[FEXCore::X86State::REG_RBP] = root_frame;
     s.rip = entry_addr;
     impl->ResetCallRetStack(impl->thread);
 

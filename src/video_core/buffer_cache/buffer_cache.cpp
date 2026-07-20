@@ -6,6 +6,7 @@
 #include "common/debug.h"
 #include "common/scope_exit.h"
 #include "core/memory.h"
+#include "video_core/amdgpu/guest_address.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker.h"
@@ -273,7 +274,7 @@ void BufferCache::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gd
     if (!is_gds) {
         texture_cache.ClearMeta(address);
         if (!IsRegionGpuModified(address, num_bytes)) {
-            u32* buffer = std::bit_cast<u32*>(address);
+            u32* buffer = AmdGpu::ResolveGuestAddressAs<u32*>(address);
             std::fill(buffer, buffer + num_bytes / sizeof(u32), value);
             return;
         }
@@ -293,7 +294,8 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         if (!src_gds && !IsRegionGpuModified(src, num_bytes) &&
             !texture_cache.FindImageFromRange(src, num_bytes)) {
             // Both buffers were not transferred to GPU yet. Can safely copy in host memory.
-            memcpy(std::bit_cast<void*>(dst), std::bit_cast<void*>(src), num_bytes);
+            memcpy(AmdGpu::ResolveGuestAddressAs<void*>(dst),
+                   AmdGpu::ResolveGuestAddressAs<void*>(src), num_bytes);
             return;
         }
         // Without a readback there's nothing we can do with this
@@ -384,7 +386,8 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= CACHING_PAGESIZE && !IsRegionGpuModified(device_addr, size) &&
         IsRegionCpuModified(device_addr, size)) {
-        const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
+        const u64 offset = stream_buffer.Copy(AmdGpu::ResolveGuestAddress(device_addr), size,
+                                              instance.UniformMinAlignment());
         return {&stream_buffer, offset};
     }
     if (IsBufferInvalid(buffer_id)) {

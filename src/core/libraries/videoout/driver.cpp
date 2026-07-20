@@ -9,6 +9,7 @@
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
 #include "core/libraries/videoout/videoout_error.h"
+#include "core/memory.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -158,7 +159,8 @@ int VideoOutDriver::RegisterBuffers(VideoOutPort* port, s32 startIndex, void* co
     group.is_occupied = true;
 
     for (u32 i = 0; i < bufferNum; i++) {
-        const uintptr_t address = reinterpret_cast<uintptr_t>(addresses[i]);
+        const uintptr_t address = Core::Memory::Instance()->TranslateCanonicalGuestAddress(
+            reinterpret_cast<VAddr>(addresses[i]));
         port->buffer_slots[startIndex + i] = VideoOutBuffer{
             .group_index = group_index,
             .address_left = address,

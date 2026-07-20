@@ -116,6 +116,9 @@ public:
     }
 
     bool is_allocated(SlotId id) const {
+        if (id.index >= values_capacity) {
+            return false;
+        }
         return ReadStorageBit(id.index);
     }
 

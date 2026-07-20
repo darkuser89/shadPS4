@@ -351,6 +351,7 @@ bool AvPlayerSource::Stop() {
     m_pause_duration = {};
 
     m_is_paused = false;
+    m_paused_seek_frame_pending = false;
     m_is_eof = false;
 
     return true;
@@ -380,6 +381,10 @@ bool AvPlayerSource::JumpToTime(u64 time_msec) {
     }
     if (was_paused) {
         Pause();
+        // A seek while paused must still make the frame at the new position observable. Games
+        // commonly wait for that preroll frame before deciding whether to resume or stop the
+        // player. Keep audio and all later video frames paused.
+        m_paused_seek_frame_pending = m_video_stream_index.has_value();
     }
 
     LOG_INFO(Lib_AvPlayer, "Jumped playback to {} ms", time_msec);
@@ -388,11 +393,13 @@ bool AvPlayerSource::JumpToTime(u64 time_msec) {
 
 void AvPlayerSource::Pause() {
     m_pause_time = std::chrono::high_resolution_clock::now();
+    m_paused_seek_frame_pending = false;
     m_is_paused = true;
 }
 
 void AvPlayerSource::Resume() {
     m_pause_duration += std::chrono::high_resolution_clock::now() - m_pause_time;
+    m_paused_seek_frame_pending = false;
     m_is_paused = false;
 }
 
@@ -411,7 +418,9 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfo& video_info) {
 }
 
 bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
-    if (!IsActive() || m_is_paused) {
+    std::unique_lock lock(m_state_mutex);
+
+    if (!IsActive()) {
         return false;
     }
 
@@ -419,8 +428,16 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
         return false;
     }
 
+    bool paused_seek_frame = false;
+    if (m_is_paused) {
+        paused_seek_frame = m_paused_seek_frame_pending.exchange(false);
+        if (!paused_seek_frame) {
+            return false;
+        }
+    }
+
     const auto& new_frame = m_video_frames.Front();
-    if (m_state.GetSyncMode() == AvPlayerAvSyncMode::Default) {
+    if (!paused_seek_frame && m_state.GetSyncMode() == AvPlayerAvSyncMode::Default) {
         if (m_audio_stream_index && m_audio_decoder_thread.Joinable()) {
             // Audio is available, sync video with it.
             if (new_frame.info.timestamp > m_last_audio_ts.value_or(0)) {
@@ -446,12 +463,23 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
     }
 
     auto frame = m_video_frames.Pop();
+    if (!frame.has_value()) {
+        if (paused_seek_frame) {
+            m_paused_seek_frame_pending = true;
+        }
+        return false;
+    }
     video_info = frame->info;
     m_current_video_frame = std::move(frame);
+    if (paused_seek_frame) {
+        LOG_INFO(Lib_AvPlayer, "Delivered paused seek frame at {} ms", video_info.timestamp);
+    }
     return true;
 }
 
 bool AvPlayerSource::GetAudioData(AvPlayerFrameInfo& audio_info) {
+    std::unique_lock lock(m_state_mutex);
+
     if (m_current_audio_frame.has_value()) {
         // return the buffer to the queue
         m_audio_buffers.Push(std::move(m_current_audio_frame->buffer));

@@ -16,6 +16,7 @@
 #include "core/libraries/audio/audioout_error.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/libs.h"
+#include "core/memory.h"
 
 namespace Libraries::AudioOut {
 
@@ -653,7 +654,14 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
     // Copy data to all ports
     for (u32 i = 0; i < num; i++) {
         if (param[i].ptr != nullptr) {
-            std::memcpy(ports[i]->output_buffer, param[i].ptr, ports[i]->BufferSize());
+            // `param` itself is translated by the HLE ABI, but pointers stored
+            // inside the guest structure are not.  Resolve the nested buffer
+            // before native code reads it.
+            const VAddr buffer_addr =
+                Core::Memory::Instance()->TranslateCanonicalGuestAddress(
+                    reinterpret_cast<VAddr>(param[i].ptr));
+            std::memcpy(ports[i]->output_buffer, reinterpret_cast<const void*>(buffer_addr),
+                        ports[i]->BufferSize());
             ports[i]->output_ready = true;
         }
     }

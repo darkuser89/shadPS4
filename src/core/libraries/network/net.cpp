@@ -790,7 +790,7 @@ int PS4_SYSV_ABI sceNetEpollCreate(const char* name, int flags) {
     }
 
     auto fd = FDTable::Instance()->CreateHandle();
-    auto* epoll = FDTable::Instance()->GetFile(fd);
+    auto epoll = FDTable::Instance()->GetFile(fd);
     epoll->is_opened = true;
     epoll->type = Core::FileSys::FileType::Epoll;
     epoll->epoll = std::make_shared<Epoll>(name);
@@ -1399,7 +1399,7 @@ int PS4_SYSV_ABI sceNetResolverCreate(const char* name, int poolid, int flags) {
     }
 
     auto fd = FDTable::Instance()->CreateHandle();
-    auto* resolver = FDTable::Instance()->GetFile(fd);
+    auto resolver = FDTable::Instance()->GetFile(fd);
     resolver->is_opened = true;
     resolver->type = Core::FileSys::FileType::Resolver;
     resolver->resolver = std::make_shared<Resolver>(safe_name, poolid, flags);

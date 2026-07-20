@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <utility>
 #include "common/string_util.h"
 #include "core/file_sys/devices/logger.h"
 #include "core/file_sys/devices/nop_device.h"
@@ -251,7 +252,7 @@ void MntPoints::IterateDirectory(std::string_view guest_directory,
 int HandleTable::CreateHandle() {
     std::scoped_lock lock{m_mutex};
 
-    auto* file = new File{};
+    auto file = std::make_shared<File>();
     file->is_opened = false;
 
     int existingFilesNum = m_files.size();
@@ -267,73 +268,75 @@ int HandleTable::CreateHandle() {
     return m_files.size() - 1;
 }
 
-void HandleTable::DeleteHandle(int d) {
-    std::scoped_lock lock{m_mutex};
-    delete m_files.at(d);
-    m_files[d] = nullptr;
-}
-
-File* HandleTable::GetFile(int d) {
+std::shared_ptr<File> HandleTable::DeleteHandle(int d) {
     std::scoped_lock lock{m_mutex};
     if (d < 0 || d >= m_files.size()) {
-        return nullptr;
+        return {};
+    }
+    return std::exchange(m_files[d], {});
+}
+
+std::shared_ptr<File> HandleTable::GetFile(int d) {
+    std::scoped_lock lock{m_mutex};
+    if (d < 0 || d >= m_files.size()) {
+        return {};
     }
     return m_files.at(d);
 }
 
-File* HandleTable::GetSocket(int d) {
+std::shared_ptr<File> HandleTable::GetSocket(int d) {
     std::scoped_lock lock{m_mutex};
     if (d < 0 || d >= m_files.size()) {
-        return nullptr;
+        return {};
     }
     auto file = m_files.at(d);
     if (!file) {
-        return nullptr;
+        return {};
     }
     if (file->type != Core::FileSys::FileType::Socket) {
-        return nullptr;
+        return {};
     }
     return file;
 }
 
-File* HandleTable::GetEpoll(int d) {
+std::shared_ptr<File> HandleTable::GetEpoll(int d) {
     std::scoped_lock lock{m_mutex};
     if (d < 0 || d >= m_files.size()) {
-        return nullptr;
+        return {};
     }
     auto file = m_files.at(d);
-    if (file->type != Core::FileSys::FileType::Epoll) {
-        return nullptr;
+    if (!file || file->type != Core::FileSys::FileType::Epoll) {
+        return {};
     }
     return file;
 }
 
-File* HandleTable::GetResolver(int d) {
+std::shared_ptr<File> HandleTable::GetResolver(int d) {
     std::scoped_lock lock{m_mutex};
     if (d < 0 || d >= m_files.size()) {
-        return nullptr;
+        return {};
     }
     auto file = m_files.at(d);
-    if (file->type != Core::FileSys::FileType::Resolver) {
-        return nullptr;
+    if (!file || file->type != Core::FileSys::FileType::Resolver) {
+        return {};
     }
     return file;
 }
 
-File* HandleTable::GetFile(const std::filesystem::path& host_name) {
+std::shared_ptr<File> HandleTable::GetFile(const std::filesystem::path& host_name) {
     std::scoped_lock lock{m_mutex};
-    for (auto* file : m_files) {
-        if (file != nullptr && file->m_host_name == host_name) {
+    for (const auto& file : m_files) {
+        if (file && file->m_host_name == host_name) {
             return file;
         }
     }
-    return nullptr;
+    return {};
 }
 
 void HandleTable::CreateStdHandles() {
     auto setup = [this](const char* path, auto* device) {
         int fd = CreateHandle();
-        auto* file = GetFile(fd);
+        auto file = GetFile(fd);
         file->is_opened = true;
         file->type = FileType::Device;
         file->m_guest_name = path;
@@ -348,7 +351,9 @@ void HandleTable::CreateStdHandles() {
 
 int HandleTable::GetFileDescriptor(File* file) {
     std::scoped_lock lock{m_mutex};
-    auto it = std::find(m_files.begin(), m_files.end(), file);
+    const auto it = std::ranges::find_if(m_files, [file](const auto& entry) {
+        return entry.get() == file;
+    });
 
     if (it != m_files.end()) {
         return std::distance(m_files.begin(), it);

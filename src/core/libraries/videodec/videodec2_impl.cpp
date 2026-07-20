@@ -5,6 +5,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "core/memory.h"
 #include "core/libraries/videodec/videodec_error.h"
 
 #include "common/support/avdec.h"
@@ -12,6 +13,10 @@
 namespace Libraries::Videodec2 {
 
 std::vector<OrbisVideodec2AvcPictureInfo> gPictureInfos;
+
+static inline u64 NV12BufferSize(const AVFrame& frame) {
+    return (u64(frame.width) * frame.height * 3) / 2;
+}
 
 static inline void CopyNV12Data(u8* dst, const AVFrame& src) {
     if (src.width == src.linesize[0]) {
@@ -117,6 +122,11 @@ s32 VdecDecoder::Decode(const OrbisVideodec2InputData& inputData,
             frame = nv12_frame;
         }
 
+        const u64 frame_size = NV12BufferSize(*frame);
+        // Notify the caches before the native write. On Darwin, writing first can fault on a
+        // page re-protected by the texture cache and synchronously wait for the GPU thread.
+        Core::Memory::Instance()->InvalidateMemory(
+            reinterpret_cast<VAddr>(frameBuffer.frameBuffer), frame_size);
         CopyNV12Data((u8*)frameBuffer.frameBuffer, *frame);
         frameBuffer.isAccepted = true;
 
@@ -195,6 +205,9 @@ s32 VdecDecoder::Flush(OrbisVideodec2FrameBuffer& frameBuffer,
             frame = nv12_frame;
         }
 
+        const u64 frame_size = NV12BufferSize(*frame);
+        Core::Memory::Instance()->InvalidateMemory(
+            reinterpret_cast<VAddr>(frameBuffer.frameBuffer), frame_size);
         CopyNV12Data((u8*)frameBuffer.frameBuffer, *frame);
         frameBuffer.isAccepted = true;
 

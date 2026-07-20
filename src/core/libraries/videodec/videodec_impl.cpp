@@ -6,15 +6,21 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "core/memory.h"
 #include "core/libraries/videodec/videodec_error.h"
 
 #include "common/support/avdec.h"
 
 namespace Libraries::Videodec {
 
+static inline u64 NV12BufferSize(const AVFrame& frame) {
+    const u32 width = Common::AlignUp((u32)frame.width, 16);
+    const u32 height = Common::AlignUp((u32)frame.height, 16);
+    return (u64(width) * height * 3) / 2;
+}
+
 static inline void CopyNV12Data(u8* dst, const AVFrame& src) {
-    u32 width = Common::AlignUp((u32)src.width, 16);
-    u32 height = Common::AlignUp((u32)src.height, 16);
+    const u32 height = Common::AlignUp((u32)src.height, 16);
     std::memcpy(dst, src.data[0], src.width * src.height);
     std::memcpy(dst + src.width * height, src.data[1], (src.width * src.height) / 2);
 }
@@ -94,6 +100,11 @@ s32 VdecDecoder::Decode(const OrbisVideodecInputData& pInputDataIn,
         frame = nv12_frame;
     }
 
+    const u64 frame_size = NV12BufferSize(*frame);
+    // Notify the caches before the native write. On Darwin, writing first can fault on a
+    // page re-protected by the texture cache and synchronously wait for the GPU thread.
+    Core::Memory::Instance()->InvalidateMemory(
+        reinterpret_cast<VAddr>(pFrameBufferInOut.pFrameBuffer), frame_size);
     CopyNV12Data((u8*)pFrameBufferInOut.pFrameBuffer, *frame);
 
     pPictureInfoOut.codecType = 0;
@@ -144,6 +155,9 @@ s32 VdecDecoder::Flush(OrbisVideodecFrameBuffer& pFrameBufferInOut,
         frame = nv12_frame;
     }
 
+    const u64 frame_size = NV12BufferSize(*frame);
+    Core::Memory::Instance()->InvalidateMemory(
+        reinterpret_cast<VAddr>(pFrameBufferInOut.pFrameBuffer), frame_size);
     CopyNV12Data((u8*)pFrameBufferInOut.pFrameBuffer, *frame);
 
     pPictureInfoOut.codecType = 0;

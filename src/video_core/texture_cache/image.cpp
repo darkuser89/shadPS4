@@ -171,6 +171,7 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                             ? image_format_properties.value.imageFormatProperties.sampleCounts
                             : vk::SampleCountFlagBits::e1;
 
+    const auto host_samples = LiverpoolToVK::NumSamples(info.num_samples, supported_samples);
     const vk::ImageCreateInfo image_ci = {
         .flags = flags,
         .imageType = ConvertImageType(info.type),
@@ -182,14 +183,14 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
         },
         .mipLevels = static_cast<u32>(info.resources.levels),
         .arrayLayers = static_cast<u32>(info.resources.layers),
-        .samples = LiverpoolToVK::NumSamples(info.num_samples, supported_samples),
+        .samples = host_samples,
         .tiling = tiling,
         .usage = usage_flags,
         .initialLayout = vk::ImageLayout::eUndefined,
     };
 
     backing = &backing_images.emplace_back();
-    backing->num_samples = info.num_samples;
+    backing->num_samples = static_cast<u32>(host_samples);
     backing->image = UniqueImage{instance->GetDevice(), instance->GetAllocator()};
     backing->image.Create(image_ci);
 
@@ -785,18 +786,20 @@ void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::Subresourc
 }
 
 void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
-    if (!backing || backing->num_samples == num_samples) {
+    const auto host_samples = LiverpoolToVK::NumSamples(num_samples, supported_samples);
+    const u32 host_num_samples = static_cast<u32>(host_samples);
+    if (!backing || backing->num_samples == host_num_samples) {
         return;
     }
     ASSERT_MSG(!info.props.is_depth, "Swapping samples is only valid for color images");
     BackingImage* new_backing;
-    auto it = std::ranges::find(backing_images, num_samples, &BackingImage::num_samples);
+    auto it = std::ranges::find(backing_images, host_num_samples, &BackingImage::num_samples);
     if (it == backing_images.end()) {
         auto new_image_ci = backing->image.image_ci;
-        new_image_ci.samples = LiverpoolToVK::NumSamples(num_samples, supported_samples);
+        new_image_ci.samples = host_samples;
 
         new_backing = &backing_images.emplace_back();
-        new_backing->num_samples = num_samples;
+        new_backing->num_samples = host_num_samples;
         new_backing->image = UniqueImage{instance->GetDevice(), instance->GetAllocator()};
         new_backing->image.Create(new_image_ci);
 
@@ -805,7 +808,7 @@ void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
                               info.size.width, info.size.height, info.size.depth,
                               AmdGpu::NameOf(info.tile_mode), vk::to_string(info.pixel_format),
                               info.guest_address, info.guest_size, info.resources.layers,
-                              info.resources.levels, num_samples);
+                              info.resources.levels, host_num_samples);
     } else {
         new_backing = std::addressof(*it);
     }

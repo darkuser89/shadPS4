@@ -171,11 +171,19 @@ public:
 
     /// Returns true if the specified address is a metadata surface.
     bool IsMeta(VAddr address) const {
+        if (address == 0) {
+            return false;
+        }
+        std::scoped_lock lock{surface_metas_mutex};
         return surface_metas.contains(address);
     }
 
     /// Returns true if a slice of the specified metadata surface has been cleared.
     bool IsMetaCleared(VAddr address, u32 slice) const {
+        if (address == 0 || slice >= 32) {
+            return false;
+        }
+        std::scoped_lock lock{surface_metas_mutex};
         const auto& it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             return it.value().clear_mask & (1u << slice);
@@ -185,6 +193,10 @@ public:
 
     /// Clears all slices of the specified metadata surface.
     bool ClearMeta(VAddr address) {
+        if (address == 0) {
+            return false;
+        }
+        std::scoped_lock lock{surface_metas_mutex};
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             it.value().clear_mask = u32(-1);
@@ -195,6 +207,10 @@ public:
 
     /// Updates the state of a slice of the specified metadata surface.
     bool TouchMeta(VAddr address, u32 slice, bool is_clear) {
+        if (address == 0 || slice >= 32) {
+            return false;
+        }
+        std::scoped_lock lock{surface_metas_mutex};
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             if (is_clear) {
@@ -344,9 +360,36 @@ private:
             FMask,
             HTile,
         };
-        Type type;
+
+        struct Owner {
+            Type type;
+            ImageId image_id;
+            u64 image_uid;
+
+            bool Matches(Type expected_type, ImageId expected_id, u64 expected_uid) const {
+                return type == expected_type && image_id == expected_id &&
+                       image_uid == expected_uid;
+            }
+        };
+
+        // Clear state belongs to the physical metadata address, not to one particular image view.
+        boost::container::small_vector<Owner, 2> owners;
         s32 clear_mask = -1;
+
+        bool HasOwner(Type expected_type, ImageId expected_id, u64 expected_uid) const {
+            for (const auto& owner : owners) {
+                if (owner.Matches(expected_type, expected_id, expected_uid)) {
+                    return true;
+                }
+            }
+            return false;
+        }
     };
+    void ReplaceMetaBinding(VAddr& current_address, const bool& is_retired, VAddr new_address,
+                            MetaDataInfo::Type type, ImageId owner_id, u64 owner_uid,
+                            s32 initial_clear_mask = -1);
+    void UnregisterMetaBindings(Image& image, ImageId owner_id);
+    mutable std::mutex surface_metas_mutex;
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
 };
 

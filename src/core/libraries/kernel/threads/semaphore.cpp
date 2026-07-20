@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <condition_variable>
 #include <list>
 #include <memory>
@@ -38,6 +39,50 @@ static std::mutex pthread_sems_mutex;
 static std::once_flag shadow_semaphore_warning;
 static std::unordered_map<PthreadSem**, std::shared_ptr<PthreadSem>> pthread_sems_by_handle;
 static std::unordered_map<PthreadSem*, std::weak_ptr<PthreadSem>> pthread_sems_by_impl;
+
+enum class SemaphoreActivity {
+    Create,
+    Cancel,
+    Delete,
+};
+
+struct SemaphoreActivityStats {
+    std::atomic<u64> created{};
+    std::atomic<u64> canceled{};
+    std::atomic<u64> deleted{};
+    std::atomic<u64> total{};
+};
+
+static SemaphoreActivityStats semaphore_activity;
+
+static void RecordSemaphoreActivity(SemaphoreActivity activity) {
+    switch (activity) {
+    case SemaphoreActivity::Create:
+        semaphore_activity.created.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case SemaphoreActivity::Cancel:
+        semaphore_activity.canceled.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case SemaphoreActivity::Delete:
+        semaphore_activity.deleted.fetch_add(1, std::memory_order_relaxed);
+        break;
+    }
+
+    // Successful semaphore operations are extremely hot in some Unity titles. Keep detailed
+    // per-object diagnostics at trace level and periodically expose an aggregate at info level.
+    constexpr u64 ReportInterval = 4096;
+    const u64 total = semaphore_activity.total.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (total % ReportInterval != 0) {
+        return;
+    }
+
+    const u64 created = semaphore_activity.created.exchange(0, std::memory_order_relaxed);
+    const u64 canceled = semaphore_activity.canceled.exchange(0, std::memory_order_relaxed);
+    const u64 deleted = semaphore_activity.deleted.exchange(0, std::memory_order_relaxed);
+    LOG_INFO(Lib_Kernel,
+             "Semaphore activity (last {} operations): created={}, canceled={}, deleted={}",
+             created + canceled + deleted, created, canceled, deleted);
+}
 
 static std::shared_ptr<PthreadSem> GetPthreadSem(PthreadSem** sem, bool create_shadow) {
     if (sem == nullptr || *sem == nullptr) {
@@ -81,6 +126,9 @@ public:
 
     s32 Wait(bool can_block, s32 need_count, u32* timeout) {
         std::unique_lock lk{mutex};
+        if (is_deleted) {
+            return ORBIS_KERNEL_ERROR_EACCES;
+        }
         if (token_count >= need_count) {
             token_count -= need_count;
             return ORBIS_OK;
@@ -114,10 +162,13 @@ public:
         return result;
     }
 
-    bool Signal(s32 signal_count) {
+    s32 Signal(s32 signal_count) {
         std::scoped_lock lk{mutex};
+        if (is_deleted) {
+            return ORBIS_KERNEL_ERROR_EACCES;
+        }
         if (token_count + signal_count > max_count) {
-            return false;
+            return ORBIS_KERNEL_ERROR_EINVAL;
         }
         token_count += signal_count;
 
@@ -134,11 +185,14 @@ public:
             waiter->sem.release();
         }
 
-        return true;
+        return ORBIS_OK;
     }
 
     s32 Cancel(s32 set_count, s32* num_waiters) {
         std::scoped_lock lk{mutex};
+        if (is_deleted) {
+            return ORBIS_KERNEL_ERROR_EACCES;
+        }
         if (num_waiters) {
             *num_waiters = static_cast<s32>(wait_list.size());
         }
@@ -153,6 +207,7 @@ public:
 
     void Delete() {
         std::scoped_lock lk{mutex};
+        is_deleted = true;
         for (auto* waiter : wait_list) {
             waiter->was_deleted = true;
             waiter->sem.release();
@@ -240,6 +295,7 @@ public:
     s32 max_count;
     s32 init_count;
     bool is_fifo;
+    bool is_deleted{};
 };
 
 // SceKernelSema is a 32-bit guest ABI handle.  Keep the SlotId wrapper on the
@@ -247,7 +303,16 @@ public:
 // these exports into an aggregate ABI case for translated guests.
 using OrbisKernelSema = u32;
 
-static Common::SlotVector<std::unique_ptr<OrbisSem>> orbis_sems;
+static Common::SlotVector<std::shared_ptr<OrbisSem>> orbis_sems;
+static std::mutex orbis_sems_mutex;
+
+static std::shared_ptr<OrbisSem> GetOrbisSem(Common::SlotId id) {
+    std::scoped_lock lock{orbis_sems_mutex};
+    if (!orbis_sems.is_allocated(id)) {
+        return {};
+    }
+    return orbis_sems[id];
+}
 
 s32 PS4_SYSV_ABI sceKernelCreateSema(OrbisKernelSema* sem, const char* pName, u32 attr,
                                      s32 initCount, s32 maxCount, const void* pOptParam) {
@@ -255,68 +320,83 @@ s32 PS4_SYSV_ABI sceKernelCreateSema(OrbisKernelSema* sem, const char* pName, u3
         LOG_ERROR(Lib_Kernel, "Semaphore creation parameters are invalid!");
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
-    *sem = orbis_sems
-               .insert(std::move(std::make_unique<OrbisSem>(initCount, maxCount, pName, attr == 1)))
-               .index;
-    LOG_INFO(Lib_Kernel, "sceKernelCreateSema: thread '{}' created sem[{}] '{}' init={} max={}",
-             g_curthread->name, *sem, pName, initCount, maxCount);
+    {
+        std::scoped_lock lock{orbis_sems_mutex};
+        *sem = orbis_sems
+                   .insert(std::make_shared<OrbisSem>(initCount, maxCount, pName, attr == 1))
+                   .index;
+    }
+    LOG_TRACE(Lib_Kernel, "sceKernelCreateSema: thread '{}' created sem[{}] '{}' init={} max={}",
+              g_curthread->name, *sem, pName, initCount, maxCount);
+    RecordSemaphoreActivity(SemaphoreActivity::Create);
     return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceKernelWaitSema(OrbisKernelSema sem, s32 needCount, u32* pTimeout) {
     const Common::SlotId id{sem};
-    if (!orbis_sems.is_allocated(id)) {
+    const auto implementation = GetOrbisSem(id);
+    if (!implementation) {
         LOG_WARNING(Lib_Kernel, "sceKernelWaitSema: thread '{}' waited on invalid sem[{}] -> ESRCH",
                     g_curthread->name, sem);
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    return orbis_sems[id]->Wait(true, needCount, pTimeout);
+    return implementation->Wait(true, needCount, pTimeout);
 }
 
 s32 PS4_SYSV_ABI sceKernelSignalSema(OrbisKernelSema sem, s32 signalCount) {
     const Common::SlotId id{sem};
-    if (!orbis_sems.is_allocated(id)) {
+    const auto implementation = GetOrbisSem(id);
+    if (!implementation) {
         LOG_WARNING(Lib_Kernel,
                     "sceKernelSignalSema: thread '{}' signaled invalid sem[{}] -> ESRCH",
                     g_curthread->name, sem);
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    if (!orbis_sems[id]->Signal(signalCount)) {
+    const s32 result = implementation->Signal(signalCount);
+    if (result == ORBIS_KERNEL_ERROR_EINVAL) {
         LOG_WARNING(Lib_Kernel,
                     "sceKernelSignalSema: thread '{}' overflowed sem[{}] (count={}) -> EINVAL",
                     g_curthread->name, sem, signalCount);
-        return ORBIS_KERNEL_ERROR_EINVAL;
     }
-    return ORBIS_OK;
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceKernelPollSema(OrbisKernelSema sem, s32 needCount) {
     const Common::SlotId id{sem};
-    if (!orbis_sems.is_allocated(id)) {
+    const auto implementation = GetOrbisSem(id);
+    if (!implementation) {
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    return orbis_sems[id]->Wait(false, needCount, nullptr);
+    return implementation->Wait(false, needCount, nullptr);
 }
 
 s32 PS4_SYSV_ABI sceKernelCancelSema(OrbisKernelSema sem, s32 setCount, s32* pNumWaitThreads) {
     const Common::SlotId id{sem};
-    if (!orbis_sems.is_allocated(id)) {
+    const auto implementation = GetOrbisSem(id);
+    if (!implementation) {
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    LOG_INFO(Lib_Kernel, "sceKernelCancelSema: thread '{}' canceled sem[{}] set_count={}",
-             g_curthread->name, sem, setCount);
-    return orbis_sems[id]->Cancel(setCount, pNumWaitThreads);
+    LOG_TRACE(Lib_Kernel, "sceKernelCancelSema: thread '{}' canceled sem[{}] set_count={}",
+              g_curthread->name, sem, setCount);
+    RecordSemaphoreActivity(SemaphoreActivity::Cancel);
+    return implementation->Cancel(setCount, pNumWaitThreads);
 }
 
 s32 PS4_SYSV_ABI sceKernelDeleteSema(OrbisKernelSema sem) {
     const Common::SlotId id{sem};
-    if (!orbis_sems.is_allocated(id)) {
-        return ORBIS_KERNEL_ERROR_ESRCH;
+    std::shared_ptr<OrbisSem> implementation;
+    {
+        std::scoped_lock lock{orbis_sems_mutex};
+        if (!orbis_sems.is_allocated(id)) {
+            return ORBIS_KERNEL_ERROR_ESRCH;
+        }
+        implementation = std::move(orbis_sems[id]);
+        orbis_sems.erase(id);
     }
-    LOG_INFO(Lib_Kernel, "sceKernelDeleteSema: thread '{}' deleted sem[{}]", g_curthread->name,
-             sem);
-    orbis_sems[id]->Delete();
-    orbis_sems.erase(id);
+    LOG_TRACE(Lib_Kernel, "sceKernelDeleteSema: thread '{}' deleted sem[{}]", g_curthread->name,
+              sem);
+    RecordSemaphoreActivity(SemaphoreActivity::Delete);
+    implementation->Delete();
     return ORBIS_OK;
 }
 

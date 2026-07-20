@@ -18,6 +18,7 @@
 #include "shader_recompiler/params.h"
 #include "shader_recompiler/resource.h"
 #include "shader_recompiler/runtime_info.h"
+#include "video_core/amdgpu/guest_address.h"
 
 namespace Serialization {
 struct Archive;
@@ -165,8 +166,10 @@ struct Info : InfoPersistent {
         T data;
         const u32* base = user_data.data();
         if (ptr_index != IR::NumScalarRegs) {
-            std::memcpy(&base, &user_data[ptr_index], sizeof(base));
-            base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
+            VAddr base_address{};
+            std::memcpy(&base_address, &user_data[ptr_index], sizeof(base_address));
+            base_address &= 0xFFFFFFFFFFFFULL;
+            base = AmdGpu::ResolveGuestAddressAs<const u32*>(base_address);
         }
         std::memcpy(&data, base + dword_offset, sizeof(T));
         return data;
@@ -201,7 +204,7 @@ struct Info : InfoPersistent {
         ASSERT(tess_consts_dword_offset >= 0); // We've already tracked the V# UD
         auto buf = ReadUdReg<AmdGpu::Buffer>(static_cast<u32>(tess_consts_ptr_base),
                                              static_cast<u32>(tess_consts_dword_offset));
-        VAddr tess_constants_addr = buf.base_address;
+        const VAddr tess_constants_addr = AmdGpu::ResolveGuestAddress(buf.base_address);
         memcpy(&tess_constants,
                reinterpret_cast<TessellationDataConstantBuffer*>(tess_constants_addr),
                sizeof(tess_constants));

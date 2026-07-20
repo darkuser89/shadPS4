@@ -195,6 +195,15 @@ public:
         u32 force_general : 1;
     } binding{};
 
+    // Metadata surfaces currently associated with this cached image.  These are runtime
+    // bindings, unlike ImageInfo::meta_info which describes the guest surface at lookup time.
+    struct {
+        VAddr cmask_addr{};
+        VAddr fmask_addr{};
+        VAddr htile_addr{};
+        bool retired{};
+    } meta_bindings{};
+
 private:
     static Common::IncrementalIdProvider<u64> global_image_uid;
 };

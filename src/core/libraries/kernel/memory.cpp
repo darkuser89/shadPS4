@@ -597,10 +597,10 @@ s32 PS4_SYSV_ABI sceKernelMemoryPoolExpand(u64 searchStart, u64 searchEnd, u64 l
     return ORBIS_OK;
 }
 
-s32 PS4_SYSV_ABI sceKernelMemoryPoolReserve(void* addr_in, u64 len, u64 alignment, s32 flags,
+s32 PS4_SYSV_ABI sceKernelMemoryPoolReserve(VAddr addr_in, u64 len, u64 alignment, s32 flags,
                                             void** addr_out) {
-    LOG_INFO(Kernel_Vmm, "addr_in = {}, len = {:#x}, alignment = {:#x}, flags = {:#x}",
-             fmt::ptr(addr_in), len, alignment, flags);
+    LOG_INFO(Kernel_Vmm, "addr_in = {:#x}, len = {:#x}, alignment = {:#x}, flags = {:#x}",
+             addr_in, len, alignment, flags);
 
     if (len == 0 || !Common::Is2MBAligned(len)) {
         LOG_ERROR(Kernel_Vmm, "Map size is either zero or not 2MB aligned!");
@@ -614,17 +614,24 @@ s32 PS4_SYSV_ABI sceKernelMemoryPoolReserve(void* addr_in, u64 len, u64 alignmen
     }
 
     auto* memory = Core::Memory::Instance();
-    const VAddr in_addr = reinterpret_cast<VAddr>(addr_in);
     const auto map_flags = static_cast<Core::MemoryMapFlags>(flags);
     u64 map_alignment = alignment == 0 ? 2_MB : alignment;
 
-    return memory->MapMemory(addr_out, std::bit_cast<VAddr>(addr_in), len,
-                             Core::MemoryProt::NoAccess, map_flags, Core::VMAType::PoolReserved,
-                             "anon", false, -1, map_alignment);
+    void* mapped_addr{};
+    const s32 result =
+        memory->MapMemory(&mapped_addr, addr_in, len,
+                          Core::MemoryProt::NoAccess, map_flags, Core::VMAType::PoolReserved,
+                          "anon", false, -1, map_alignment);
+    if (result == ORBIS_OK) {
+        const VAddr guest_addr =
+            memory->CanonicalizeGuestAddress(std::bit_cast<VAddr>(mapped_addr));
+        *addr_out = std::bit_cast<void*>(guest_addr);
+    }
+    return result;
 }
 
-s32 PS4_SYSV_ABI sceKernelMemoryPoolCommit(void* addr, u64 len, s32 type, s32 prot, s32 flags) {
-    if (addr == nullptr) {
+s32 PS4_SYSV_ABI sceKernelMemoryPoolCommit(VAddr addr, u64 len, s32 type, s32 prot, s32 flags) {
+    if (addr == 0) {
         LOG_ERROR(Kernel_Vmm, "Address is invalid!");
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
@@ -639,16 +646,15 @@ s32 PS4_SYSV_ABI sceKernelMemoryPoolCommit(void* addr, u64 len, s32 type, s32 pr
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
-    LOG_INFO(Kernel_Vmm, "addr = {}, len = {:#x}, type = {:#x}, prot = {:#x}, flags = {:#x}",
-             fmt::ptr(addr), len, type, prot, flags);
+    LOG_INFO(Kernel_Vmm, "addr = {:#x}, len = {:#x}, type = {:#x}, prot = {:#x}, flags = {:#x}",
+             addr, len, type, prot, flags);
 
-    const VAddr in_addr = reinterpret_cast<VAddr>(addr);
     auto* memory = Core::Memory::Instance();
-    return memory->PoolCommit(in_addr, len, mem_prot, type);
+    return memory->PoolCommit(addr, len, mem_prot, type);
 }
 
-s32 PS4_SYSV_ABI sceKernelMemoryPoolDecommit(void* addr, u64 len, s32 flags) {
-    if (addr == nullptr) {
+s32 PS4_SYSV_ABI sceKernelMemoryPoolDecommit(VAddr addr, u64 len, s32 flags) {
+    if (addr == 0) {
         LOG_ERROR(Kernel_Vmm, "Address is invalid!");
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
@@ -657,12 +663,11 @@ s32 PS4_SYSV_ABI sceKernelMemoryPoolDecommit(void* addr, u64 len, s32 flags) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
-    LOG_INFO(Kernel_Vmm, "addr = {}, len = {:#x}, flags = {:#x}", fmt::ptr(addr), len, flags);
+    LOG_INFO(Kernel_Vmm, "addr = {:#x}, len = {:#x}, flags = {:#x}", addr, len, flags);
 
-    const VAddr pool_addr = reinterpret_cast<VAddr>(addr);
     auto* memory = Core::Memory::Instance();
 
-    return memory->PoolDecommit(pool_addr, len);
+    return memory->PoolDecommit(addr, len);
 }
 
 s32 PS4_SYSV_ABI sceKernelMemoryPoolBatch(const OrbisKernelMemoryPoolBatchEntry* entries, s32 count,
@@ -677,14 +682,15 @@ s32 PS4_SYSV_ABI sceKernelMemoryPoolBatch(const OrbisKernelMemoryPoolBatchEntry*
         OrbisKernelMemoryPoolBatchEntry entry = entries[i];
         switch (entry.opcode) {
         case OrbisKernelMemoryPoolOpcode::Commit: {
-            result = sceKernelMemoryPoolCommit(entry.commit_params.addr, entry.commit_params.len,
-                                               entry.commit_params.type, entry.commit_params.prot,
-                                               entry.flags);
+            result = sceKernelMemoryPoolCommit(
+                reinterpret_cast<VAddr>(entry.commit_params.addr), entry.commit_params.len,
+                entry.commit_params.type, entry.commit_params.prot, entry.flags);
             break;
         }
         case OrbisKernelMemoryPoolOpcode::Decommit: {
-            result = sceKernelMemoryPoolDecommit(entry.decommit_params.addr,
-                                                 entry.decommit_params.len, entry.flags);
+            result = sceKernelMemoryPoolDecommit(
+                reinterpret_cast<VAddr>(entry.decommit_params.addr),
+                entry.decommit_params.len, entry.flags);
             break;
         }
         case OrbisKernelMemoryPoolOpcode::Protect: {

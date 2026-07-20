@@ -6,6 +6,7 @@
 #include "common/assert.h"
 #include "common/types.h"
 #include "shader_recompiler/params.h"
+#include "video_core/amdgpu/guest_address.h"
 
 namespace AmdGpu {
 
@@ -75,7 +76,7 @@ struct ShaderProgram {
 
     template <typename T = u8*>
     const T Address() const {
-        return std::bit_cast<T>(address << 8);
+        return ResolveGuestAddressAs<T>(address << 8);
     }
 
     [[nodiscard]] u32 NumVgprs() const {
@@ -192,7 +193,7 @@ struct ComputeProgram {
 
     template <typename T = u8*>
     const T Address() const {
-        return std::bit_cast<T>(address << 8);
+        return ResolveGuestAddressAs<T>(address << 8);
     }
 
     u32 SharedMemSize() const noexcept {
@@ -228,7 +229,7 @@ static constexpr const BinaryInfo& SearchBinaryInfo(const u32* code) {
     UNREACHABLE_MSG("Shader binary info not found.");
 }
 
-static constexpr Shader::ShaderParams GetParams(const auto& sh) {
+static Shader::ShaderParams GetParams(const auto& sh) {
     const auto* code = sh.template Address<u32*>();
     const auto& bininfo = SearchBinaryInfo(code);
     return {
