@@ -160,6 +160,13 @@ s32 AvPlayer::Pause() {
     return ORBIS_OK;
 }
 
+s32 AvPlayer::JumpToTime(u64 time) {
+    if (m_state == nullptr || !m_state->JumpToTime(time)) {
+        return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED;
+    }
+    return ORBIS_OK;
+}
+
 s32 AvPlayer::Resume() {
     if (m_state == nullptr || !m_state->Resume()) {
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED;

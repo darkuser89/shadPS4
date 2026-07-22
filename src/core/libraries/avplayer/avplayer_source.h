@@ -152,9 +152,10 @@ public:
     bool EnableStream(u32 stream_index);
     void SetLooping(bool is_looping);
     std::optional<bool> HasFrames(u32 num_frames);
-    bool Start();
+    bool Start(u64 time = 0);
     bool Stop();
     void Pause();
+    bool JumpToTime(u64 time);
     void Resume();
     bool GetAudioData(AvPlayerFrameInfo& audio_info);
     bool GetVideoData(AvPlayerFrameInfo& video_info);
@@ -200,6 +201,8 @@ private:
     std::atomic_bool m_is_looping = false;
     std::atomic_bool m_is_paused = false;
     std::atomic_bool m_is_eof = false;
+    std::atomic_bool m_has_pending_seek_frame = false;
+    std::atomic_uint64_t m_seek_time = 0;
 
     std::unique_ptr<IDataStreamer> m_up_data_streamer;
 

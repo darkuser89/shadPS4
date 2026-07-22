@@ -32,6 +32,7 @@ public:
     bool Start();
     bool Stop();
     bool Pause();
+    bool JumpToTime(u64 time);
     bool Resume();
     void SetAvSyncMode(AvPlayerAvSyncMode sync_mode);
     bool GetAudioData(AvPlayerFrameInfo& audio_info);

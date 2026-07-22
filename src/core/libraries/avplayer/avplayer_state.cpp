@@ -218,6 +218,16 @@ bool AvPlayerState::Pause() {
 }
 
 // Called inside GAME thread
+bool AvPlayerState::JumpToTime(u64 time) {
+    std::shared_lock lock(m_source_mutex);
+    if (m_up_source == nullptr || !IsStateTransitionValid(AvState::Jump)) {
+        LOG_ERROR(Lib_AvPlayer, "Could not jump to time {}.", time);
+        return false;
+    }
+    return m_up_source->JumpToTime(time);
+}
+
+// Called inside GAME thread
 bool AvPlayerState::Resume() {
     std::shared_lock lock(m_source_mutex);
     if (m_up_source == nullptr || m_current_state != AvState::Pause) {

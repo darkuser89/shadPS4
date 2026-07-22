@@ -24,6 +24,7 @@ public:
     s32 EnableStream(u32 stream_index);
     s32 Start();
     s32 Pause();
+    s32 JumpToTime(u64 time);
     s32 Resume();
     s32 SetAvSyncMode(AvPlayerAvSyncMode sync_mode);
     bool GetAudioData(AvPlayerFrameInfo& audio_info);
