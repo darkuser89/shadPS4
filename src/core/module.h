@@ -214,6 +214,9 @@ public:
     s32 Start(u64 args, const void* argp, void* param);
     void LoadModuleToMemory(u32& max_tls_index);
     void LoadDynamicInfo();
+#ifdef ARCH_X86_64
+    void RestorePrelinkedImportStubs();
+#endif
     void LoadSymbols();
 
     void* FindByName(std::string_view name);

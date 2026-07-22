@@ -86,11 +86,10 @@ static bool FilterTcbAccess(const ZydisDecodedOperand* operands) {
     const auto& dst_op = operands[0];
     const auto& src_op = operands[1];
 
-    // Patch only 'mov (64-bit register), fs:[0]'
+    // Patch accesses to fields in the thread control block through FS.
     return src_op.type == ZYDIS_OPERAND_TYPE_MEMORY && src_op.mem.segment == ZYDIS_REGISTER_FS &&
            src_op.mem.base == ZYDIS_REGISTER_NONE && src_op.mem.index == ZYDIS_REGISTER_NONE &&
-           src_op.mem.disp.value == 0 && dst_op.reg.value >= ZYDIS_REGISTER_RAX &&
-           dst_op.reg.value <= ZYDIS_REGISTER_R15;
+           dst_op.reg.value >= ZYDIS_REGISTER_RAX && dst_op.reg.value <= ZYDIS_REGISTER_R15;
 }
 
 #if defined(_WIN32)
@@ -124,6 +123,10 @@ static void GenerateTcbAccess(void* /* address */, const ZydisDecodedOperand* op
 
 #if defined(_WIN32)
     RetrieveTcbPointer(dst, c);
+    const auto displacement = operands[1].mem.disp.value;
+    if (displacement != 0) {
+        c.mov(dst, qword[dst + displacement]);
+    }
 #else
     const auto src = ZydisToXbyakMemoryOperand(operands[1]);
 
@@ -148,6 +151,10 @@ static void GenerateTcbCompare(void* /* address */, const ZydisDecodedOperand* o
 
     // Retrieve value from TCB and store it in the scratch register
     RetrieveTcbPointer(scratch, c);
+    const auto displacement = operands[1].mem.disp.value;
+    if (displacement != 0) {
+        c.mov(scratch, qword[scratch + displacement]);
+    }
 
     // Perform compare op
     c.cmp(dst, scratch);
@@ -180,6 +187,10 @@ static void GenerateTcbExclusiveOr(void* /* address */, const ZydisDecodedOperan
 
     // Retrieve value from TCB and store it in the scratch register
     RetrieveTcbPointer(scratch, c);
+    const auto displacement = operands[1].mem.disp.value;
+    if (displacement != 0) {
+        c.mov(scratch, qword[scratch + displacement]);
+    }
 
     // Perform xor
     c.xor_(dst, scratch);

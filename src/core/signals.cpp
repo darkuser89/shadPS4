@@ -65,6 +65,21 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
+    if (code == EXCEPTION_ACCESS_VIOLATION) {
+        const auto operation = pExp->ExceptionRecord->ExceptionInformation[0];
+        const auto fault_address =
+            reinterpret_cast<void*>(pExp->ExceptionRecord->ExceptionInformation[1]);
+        const char* access = operation == 0   ? "Read from"
+                             : operation == 1 ? "Write to"
+                             : operation == 8 ? "Execute at"
+                                              : "Access";
+
+        LOG_CRITICAL(Debug, "Unhandled access violation at {}: {} {}", address, access,
+                     fault_address);
+        Common::Singleton<Core::Emulator>::Instance()->Shutdown();
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
     // Breakpoints almost certainly come from our asserts/unreachables, no need to log it again.
     if (code != EXCEPTION_BREAKPOINT) {
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);

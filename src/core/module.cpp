@@ -16,6 +16,8 @@
 #include "core/module.h"
 #include "core/tls.h"
 
+#include <unordered_map>
+
 namespace Core {
 
 using EntryFunc = PS4_SYSV_ABI int (*)(size_t args, const void* argp, void* param);
@@ -25,6 +27,20 @@ static constexpr u64 ModuleLoadBase = 0x800000000;
 static u64 GetAlignedSize(const elf_program_header& phdr) {
     return (phdr.p_align != 0 ? (phdr.p_memsz + (phdr.p_align - 1)) & ~(phdr.p_align - 1)
                               : phdr.p_memsz);
+}
+
+static MemoryProt GetMemoryProtection(s32 flags) {
+    auto prot = MemoryProt::NoAccess;
+    if ((flags & PF_READ) != 0) {
+        prot |= MemoryProt::CpuRead;
+    }
+    if ((flags & PF_WRITE) != 0) {
+        prot |= MemoryProt::CpuWrite;
+    }
+    if ((flags & PF_EXEC) != 0) {
+        prot |= MemoryProt::CpuExec;
+    }
+    return prot;
 }
 
 static u64 CalculateBaseSize(const elf_header& ehdr, std::span<const elf_program_header> phdr) {
@@ -89,6 +105,9 @@ Module::Module(Core::MemoryManager* memory_, const std::filesystem::path& file_,
     if (elf.IsElfFile()) {
         LoadModuleToMemory(max_tls_index);
         LoadDynamicInfo();
+#ifdef ARCH_X86_64
+        RestorePrelinkedImportStubs();
+#endif
         LoadSymbols();
     }
 }
@@ -140,22 +159,11 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
         void* segment_addr = std::bit_cast<void*>(segment_vaddr);
         const u64 segment_size = GetAlignedSize(phdr);
         if (do_map) {
-            // Convert ELF flags to memory prot.
-            auto segment_prot = MemoryProt::NoAccess;
-            if ((phdr.p_flags & PF_READ) != 0) {
-                segment_prot |= MemoryProt::CpuRead;
-            }
-            if ((phdr.p_flags & PF_WRITE) != 0) {
-                segment_prot |= MemoryProt::CpuWrite;
-            }
-            if ((phdr.p_flags & PF_EXEC) != 0) {
-                segment_prot |= MemoryProt::CpuExec;
-            }
-
             // Map module segments
             const auto memory_type = IsSystemLib() ? VMAType::Code : VMAType::Flexible;
-            s32 result = memory->MapMemory(&segment_addr, segment_vaddr, segment_size, segment_prot,
-                                           MemoryMapFlags::Fixed, memory_type, name);
+            s32 result = memory->MapMemory(&segment_addr, segment_vaddr, segment_size,
+                                           GetMemoryProtection(phdr.p_flags), MemoryMapFlags::Fixed,
+                                           memory_type, name);
             ASSERT_MSG(result == ORBIS_OK, "Failed to map segment at {:#x} for module {}",
                        segment_vaddr, name);
             elf.LoadSegment(segment_vaddr, phdr.p_offset, phdr.p_filesz);
@@ -427,6 +435,149 @@ void Module::LoadDynamicInfo() {
                              dynamic_info.jmp_relocation_table_size / sizeof(elf_relocation);
     rela_bits.resize((relabits_num + 7) / 8);
 }
+
+#ifdef ARCH_X86_64
+void Module::RestorePrelinkedImportStubs() {
+    static constexpr u64 PltEntrySize = 16;
+    static constexpr size_t PltStubSize = 8;
+
+    const u32 num_relocations = dynamic_info.jmp_relocation_table_size / sizeof(elf_relocation);
+    if (num_relocations < 2 || dynamic_info.jmp_relocation_table == nullptr) {
+        return;
+    }
+
+    std::unordered_map<u64, u32> relocation_indices;
+    relocation_indices.reserve(num_relocations);
+    for (u32 i = 0; i < num_relocations; i++) {
+        const auto& relocation = dynamic_info.jmp_relocation_table[i];
+        if (relocation.GetType() == R_X86_64_JUMP_SLOT) {
+            relocation_indices.emplace(relocation.rel_offset, i);
+        }
+    }
+
+    // Recover the PLT layout from intact entries. A standard PS4 PLT stub is an indirect jump
+    // through the GOT followed by two padding bytes, with one stub every 16 bytes.
+    std::unordered_map<VAddr, u32> plt_bases;
+    for (u32 i = 0; i < info.num_segments; i++) {
+        const auto& segment = info.segments[i];
+        if ((segment.prot & PF_EXEC) == 0 || segment.size < PltStubSize) {
+            continue;
+        }
+
+        const auto* code = reinterpret_cast<const u8*>(segment.address);
+        for (u64 offset = 0; offset <= segment.size - PltStubSize; offset++) {
+            const auto* stub = code + offset;
+            if (stub[0] != 0xff || stub[1] != 0x25 || stub[6] != 0xcc || stub[7] != 0xcc) {
+                continue;
+            }
+
+            s32 displacement;
+            std::memcpy(&displacement, stub + 2, sizeof(displacement));
+            const VAddr stub_address = segment.address + offset;
+            const VAddr target_address = stub_address + 6 + displacement;
+            if (target_address < base_virtual_addr) {
+                continue;
+            }
+
+            const auto relocation = relocation_indices.find(target_address - base_virtual_addr);
+            if (relocation == relocation_indices.end() ||
+                stub_address < relocation->second * PltEntrySize) {
+                continue;
+            }
+            ++plt_bases[stub_address - relocation->second * PltEntrySize];
+        }
+    }
+
+    const auto plt =
+        std::ranges::max_element(plt_bases, {}, &decltype(plt_bases)::value_type::second);
+    if (plt == plt_bases.end() || plt->second < 2) {
+        return;
+    }
+
+    struct StubPatch {
+        VAddr address;
+        s32 displacement;
+        u32 segment_index;
+    };
+    std::vector<StubPatch> patches;
+    for (u32 i = 0; i < num_relocations; i++) {
+        const auto& relocation = dynamic_info.jmp_relocation_table[i];
+        if (relocation.GetType() != R_X86_64_JUMP_SLOT) {
+            continue;
+        }
+
+        const VAddr stub_address = plt->first + i * PltEntrySize;
+        u32 segment_index = info.num_segments;
+        for (u32 j = 0; j < info.num_segments; j++) {
+            const auto& segment = info.segments[j];
+            if ((segment.prot & PF_EXEC) != 0 && stub_address >= segment.address &&
+                stub_address + PltStubSize <= segment.address + segment.size) {
+                segment_index = j;
+                break;
+            }
+        }
+        if (segment_index == info.num_segments) {
+            continue;
+        }
+
+        const auto* stub = reinterpret_cast<const u8*>(stub_address);
+        if (stub[0] != 0xe9 || stub[5] != 0x90 || stub[6] != 0xcc || stub[7] != 0xcc) {
+            continue;
+        }
+
+        s32 prelinked_displacement;
+        std::memcpy(&prelinked_displacement, stub + 1, sizeof(prelinked_displacement));
+        const VAddr prelinked_target = stub_address + 5 + prelinked_displacement;
+        if (prelinked_target >= base_virtual_addr &&
+            prelinked_target < base_virtual_addr + aligned_base_size) {
+            continue;
+        }
+
+        const VAddr got_address = base_virtual_addr + relocation.rel_offset;
+        const s64 displacement = static_cast<s64>(got_address) - static_cast<s64>(stub_address + 6);
+        if (displacement < std::numeric_limits<s32>::min() ||
+            displacement > std::numeric_limits<s32>::max()) {
+            continue;
+        }
+        patches.push_back({stub_address, static_cast<s32>(displacement), segment_index});
+    }
+
+    if (patches.empty()) {
+        return;
+    }
+
+    std::array<bool, SCE_DBG_MAX_SEGMENTS> modified_segments{};
+    for (const auto& patch : patches) {
+        modified_segments[patch.segment_index] = true;
+    }
+    for (u32 i = 0; i < info.num_segments; i++) {
+        if (modified_segments[i]) {
+            const auto& segment = info.segments[i];
+            const s32 result = memory->Protect(segment.address, segment.size,
+                                               MemoryProt::CpuReadWrite | MemoryProt::CpuExec);
+            ASSERT_MSG(result == ORBIS_OK, "Failed to make PLT writable in module {}", name);
+        }
+    }
+
+    for (const auto& patch : patches) {
+        auto* stub = reinterpret_cast<u8*>(patch.address);
+        stub[0] = 0xff;
+        stub[1] = 0x25;
+        std::memcpy(stub + 2, &patch.displacement, sizeof(patch.displacement));
+    }
+
+    for (u32 i = 0; i < info.num_segments; i++) {
+        if (modified_segments[i]) {
+            const auto& segment = info.segments[i];
+            const s32 result =
+                memory->Protect(segment.address, segment.size, GetMemoryProtection(segment.prot));
+            ASSERT_MSG(result == ORBIS_OK, "Failed to restore PLT protection in module {}", name);
+        }
+    }
+
+    LOG_WARNING(Core_Linker, "Restored {} prelinked import stubs in {}", patches.size(), name);
+}
+#endif
 
 void Module::LoadSymbols() {
     const auto symbol_database = [this](Loader::SymbolsResolver& symbol, bool export_func) {
