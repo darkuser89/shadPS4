@@ -338,6 +338,7 @@ set(KERNEL_LIB src/core/libraries/kernel/coredump/coredump.cpp
                src/core/libraries/kernel/threads/sleepq.h
                src/core/libraries/kernel/threads/stack.cpp
                src/core/libraries/kernel/threads/tcb.cpp
+               src/core/libraries/kernel/threads/umtx.cpp
                src/core/libraries/kernel/threads/pthread.h
                src/core/libraries/kernel/threads/thread_state.cpp
                src/core/libraries/kernel/threads/thread_state.h

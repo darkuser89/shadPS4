@@ -569,6 +569,11 @@ s32 PS4_SYSV_ABI sceKernelDebugRaiseExceptionOnReleaseMode(u32 error, s64 unk) {
     return ORBIS_OK;
 }
 
+static s32 PS4_SYSV_ABI IsSignalReturn(VAddr address) {
+    // The initial process stack uses address 1 as its unwind terminator.
+    return address == 1;
+}
+
 void RegisterException(Core::Loader::SymbolsResolver* sym) {
     LIB_OBJ("nQVWJEGHObc", "libkernel", 1, "libkernel", &g_sigintr);
 
@@ -592,6 +597,7 @@ void RegisterException(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("aPcyptbOiZs", "libkernel", 1, "libkernel", posix_sigprocmask);
     LIB_FUNCTION("yH-uQW3LbX0", "libkernel", 1, "libkernel", posix_pthread_kill);
     LIB_FUNCTION("sHziAegVp74", "libkernel", 1, "libkernel", posix_sigalstack);
+    LIB_FUNCTION("crb5j7mkk1c", "libkernel", 1, "libkernel", IsSignalReturn);
 
     LIB_FUNCTION("KiJEPEWRyUY", "libScePosix", 1, "libkernel", posix_sigaction);
     LIB_FUNCTION("VADc3MNQ3cM", "libScePosix", 1, "libkernel", posix_signal);

@@ -597,6 +597,10 @@ static inline void TestCancel(const Pthread* curthread) {
     }
 }
 
+void PS4_SYSV_ABI posix_pthread_testcancel() {
+    TestCancel(g_curthread);
+}
+
 int PS4_SYSV_ABI posix_pthread_setcancelstate(PthreadCancelState state,
                                               PthreadCancelState* oldstate) {
     Pthread* curthread = g_curthread;
@@ -737,6 +741,7 @@ void RegisterThread(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("OxhIB8LB-PQ", "libScePosix", 1, "libkernel", posix_pthread_create);
     LIB_FUNCTION("Jmi+9w9u0E4", "libScePosix", 1, "libkernel", posix_pthread_create_name_np);
     LIB_FUNCTION("lZzFeSxPl08", "libScePosix", 1, "libkernel", posix_pthread_setcancelstate);
+    LIB_FUNCTION("nYBrkGDqxh8", "libScePosix", 1, "libkernel", posix_pthread_testcancel);
     LIB_FUNCTION("a2P9wYGeZvc", "libScePosix", 1, "libkernel", posix_pthread_setprio);
     LIB_FUNCTION("9vyP6Z7bqzc", "libScePosix", 1, "libkernel", posix_pthread_rename_np);
     LIB_FUNCTION("FIs3-UQT9sg", "libScePosix", 1, "libkernel", posix_pthread_getschedparam);
@@ -750,6 +755,7 @@ void RegisterThread(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("OxhIB8LB-PQ", "libkernel", 1, "libkernel", posix_pthread_create);
     LIB_FUNCTION("Jmi+9w9u0E4", "libkernel", 1, "libkernel", posix_pthread_create_name_np);
     LIB_FUNCTION("lZzFeSxPl08", "libkernel", 1, "libkernel", posix_pthread_setcancelstate);
+    LIB_FUNCTION("nYBrkGDqxh8", "libkernel", 1, "libkernel", posix_pthread_testcancel);
     LIB_FUNCTION("CBNtXOoef-E", "libkernel", 1, "libkernel", posix_sched_get_priority_max);
     LIB_FUNCTION("m0iS6jNsXds", "libkernel", 1, "libkernel", posix_sched_get_priority_min);
     LIB_FUNCTION("Xs9hdiD7sAA", "libkernel", 1, "libkernel", posix_pthread_setschedparam);
