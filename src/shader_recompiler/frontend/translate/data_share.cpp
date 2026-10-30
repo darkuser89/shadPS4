@@ -3,11 +3,172 @@
 
 #include "shader_recompiler/frontend/translate/translate.h"
 #include "shader_recompiler/ir/reg.h"
+#include "shader_recompiler/profile.h"
 #include "shader_recompiler/runtime_info.h"
 
 namespace Shader::Gcn {
 
 void Translator::EmitDataShare(const GcnInst& inst) {
+    if (profile.needs_software_float_atomics && profile.needs_software_shared_int64_atomics) {
+        switch (inst.opcode) {
+        case Opcode::DS_CMPST_F32:
+            return DS_CMPST(32, false, inst, true);
+        case Opcode::DS_CMPST_RTN_F32:
+            return DS_CMPST(32, true, inst, true);
+        case Opcode::DS_CMPST_F64:
+            return DS_CMPST(64, false, inst, true);
+        case Opcode::DS_CMPST_RTN_F64:
+            return DS_CMPST(64, true, inst, true);
+        default:
+            break;
+        }
+    }
+    if (profile.needs_software_shared_int64_atomics) {
+        switch (inst.opcode) {
+        case Opcode::DS_ADD_SRC2_U32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::Add);
+        case Opcode::DS_SUB_SRC2_U32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::Subtract);
+        case Opcode::DS_RSUB_SRC2_U32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::ReverseSubtract);
+        case Opcode::DS_INC_SRC2_U32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::Increment);
+        case Opcode::DS_DEC_SRC2_U32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::Decrement);
+        case Opcode::DS_MIN_SRC2_I32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::SignedMin);
+        case Opcode::DS_MAX_SRC2_I32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::SignedMax);
+        case Opcode::DS_MIN_SRC2_U32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::UnsignedMin);
+        case Opcode::DS_MAX_SRC2_U32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::UnsignedMax);
+        case Opcode::DS_AND_SRC2_B32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::And);
+        case Opcode::DS_OR_SRC2_B32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::Or);
+        case Opcode::DS_XOR_SRC2_B32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::Xor);
+        case Opcode::DS_WRITE_SRC2_B32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::Write);
+        case Opcode::DS_MIN_SRC2_F32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::FloatMin);
+        case Opcode::DS_MAX_SRC2_F32:
+            return DS_SRC2(inst, 32, IR::SharedMemoryOperation::FloatMax);
+        case Opcode::DS_ADD_SRC2_U64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::Add);
+        case Opcode::DS_SUB_SRC2_U64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::Subtract);
+        case Opcode::DS_RSUB_SRC2_U64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::ReverseSubtract);
+        case Opcode::DS_INC_SRC2_U64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::Increment);
+        case Opcode::DS_DEC_SRC2_U64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::Decrement);
+        case Opcode::DS_MIN_SRC2_I64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::SignedMin);
+        case Opcode::DS_MAX_SRC2_I64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::SignedMax);
+        case Opcode::DS_MIN_SRC2_U64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::UnsignedMin);
+        case Opcode::DS_MAX_SRC2_U64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::UnsignedMax);
+        case Opcode::DS_AND_SRC2_B64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::And);
+        case Opcode::DS_OR_SRC2_B64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::Or);
+        case Opcode::DS_XOR_SRC2_B64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::Xor);
+        case Opcode::DS_WRITE_SRC2_B64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::Write);
+        case Opcode::DS_MIN_SRC2_F64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::FloatMin);
+        case Opcode::DS_MAX_SRC2_F64:
+            return DS_SRC2(inst, 64, IR::SharedMemoryOperation::FloatMax);
+        case Opcode::DS_ADD_RTN_U64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Add, true);
+        case Opcode::DS_SUB_U64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Sub, false);
+        case Opcode::DS_SUB_RTN_U64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Sub, true);
+        case Opcode::DS_INC_U64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Inc, false);
+        case Opcode::DS_INC_RTN_U64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Inc, true);
+        case Opcode::DS_DEC_U64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Dec, false);
+        case Opcode::DS_DEC_RTN_U64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Dec, true);
+        case Opcode::DS_MIN_I64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Smin, false);
+        case Opcode::DS_MIN_RTN_I64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Smin, true);
+        case Opcode::DS_MAX_I64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Smax, false);
+        case Opcode::DS_MAX_RTN_I64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Smax, true);
+        case Opcode::DS_MIN_U64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Umin, false);
+        case Opcode::DS_MIN_RTN_U64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Umin, true);
+        case Opcode::DS_MAX_U64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Umax, false);
+        case Opcode::DS_MAX_RTN_U64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Umax, true);
+        case Opcode::DS_AND_B64:
+            return DS_OP<IR::U64>(inst, AtomicOp::And, false);
+        case Opcode::DS_AND_RTN_B64:
+            return DS_OP<IR::U64>(inst, AtomicOp::And, true);
+        case Opcode::DS_OR_B64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Or, false);
+        case Opcode::DS_OR_RTN_B64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Or, true);
+        case Opcode::DS_XOR_B64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Xor, false);
+        case Opcode::DS_XOR_RTN_B64:
+            return DS_OP<IR::U64>(inst, AtomicOp::Xor, true);
+        case Opcode::DS_RSUB_U64:
+            return DS_RMW64(inst, false);
+        case Opcode::DS_RSUB_RTN_U64:
+            return DS_RMW64(inst, true);
+        case Opcode::DS_MSKOR_B64:
+            return DS_RMW64(inst, false);
+        case Opcode::DS_MSKOR_RTN_B64:
+            return DS_RMW64(inst, true);
+        case Opcode::DS_WRXCHG_RTN_B64:
+            return DS_WRXCHG64(inst, false, false);
+        case Opcode::DS_WRXCHG2_RTN_B64:
+            return DS_WRXCHG64(inst, true, false);
+        case Opcode::DS_WRXCHG2ST64_RTN_B64:
+            return DS_WRXCHG64(inst, true, true);
+        default:
+            break;
+        }
+    }
+    if (profile.needs_extended_ds_atomics) {
+        switch (inst.opcode) {
+        case Opcode::DS_RSUB_U32:
+            return DS_RMW32(inst, false);
+        case Opcode::DS_RSUB_RTN_U32:
+        case Opcode::DS_MSKOR_RTN_B32:
+        case Opcode::DS_WRAP_RTN_B32:
+            return DS_RMW32(inst, true);
+        case Opcode::DS_MSKOR_B32:
+            return DS_RMW32(inst, false);
+        case Opcode::DS_MIN_RTN_I32:
+            return DS_OP(inst, AtomicOp::Smin, true);
+        case Opcode::DS_MAX_RTN_I32:
+            return DS_OP(inst, AtomicOp::Smax, true);
+        case Opcode::DS_WRXCHG_RTN_B32:
+            return DS_WRXCHG32(inst, false, false);
+        case Opcode::DS_WRXCHG2_RTN_B32:
+            return DS_WRXCHG32(inst, true, false);
+        case Opcode::DS_WRXCHG2ST64_RTN_B32:
+            return DS_WRXCHG32(inst, true, true);
+        default:
+            break;
+        }
+    }
     switch (inst.opcode) {
         // DS
     case Opcode::DS_ADD_U32:
@@ -44,6 +205,16 @@ void Translator::EmitDataShare(const GcnInst& inst) {
         return DS_OP(inst, AtomicOp::Add, true);
     case Opcode::DS_SUB_RTN_U32:
         return DS_OP(inst, AtomicOp::Sub, true);
+    case Opcode::DS_INC_RTN_U32:
+        if (!profile.needs_bounded_atomic_counters) {
+            return LogMissingOpcode(inst);
+        }
+        return DS_OP(inst, AtomicOp::Inc, true);
+    case Opcode::DS_DEC_RTN_U32:
+        if (!profile.needs_bounded_atomic_counters) {
+            return LogMissingOpcode(inst);
+        }
+        return DS_OP(inst, AtomicOp::Dec, true);
     case Opcode::DS_MIN_RTN_U32:
         return DS_OP(inst, AtomicOp::Umin, true);
     case Opcode::DS_MAX_RTN_U32:
@@ -124,7 +295,8 @@ void Translator::DS_OP(const GcnInst& inst, AtomicOp op, bool rtn) {
     const bool is_gds = inst.control.ds.gds;
     const IR::U32 addr{GetSrc(inst.src[0])};
     const T data = [&] {
-        if (op == AtomicOp::Inc || op == AtomicOp::Dec) {
+        if ((op == AtomicOp::Inc || op == AtomicOp::Dec) &&
+            !profile.needs_bounded_atomic_counters) {
             return T{};
         }
         if constexpr (std::is_same_v<T, IR::U32>) {
@@ -157,8 +329,26 @@ void Translator::DS_OP(const GcnInst& inst, AtomicOp op, bool rtn) {
         case AtomicOp::Sub:
             return ir.SharedAtomicISub(addr_offset, data, is_gds);
         case AtomicOp::Inc:
+            if constexpr (std::is_same_v<T, IR::U32>) {
+                if (profile.needs_bounded_atomic_counters) {
+                    return ir.SharedAtomicInc(addr_offset, data, is_gds);
+                }
+            } else {
+                if (profile.needs_software_shared_int64_atomics) {
+                    return ir.SharedAtomicInc(addr_offset, data, is_gds);
+                }
+            }
             return ir.SharedAtomicInc<T>(addr_offset, is_gds);
         case AtomicOp::Dec:
+            if constexpr (std::is_same_v<T, IR::U32>) {
+                if (profile.needs_bounded_atomic_counters) {
+                    return ir.SharedAtomicDec(addr_offset, data, is_gds);
+                }
+            } else {
+                if (profile.needs_software_shared_int64_atomics) {
+                    return ir.SharedAtomicDec(addr_offset, data, is_gds);
+                }
+            }
             return ir.SharedAtomicDec<T>(addr_offset, is_gds);
         default:
             UNREACHABLE();
@@ -173,7 +363,112 @@ void Translator::DS_OP(const GcnInst& inst, AtomicOp op, bool rtn) {
     }
 }
 
-void Translator::DS_CMPST(int bit_size, bool rtn, const GcnInst& inst) {
+void Translator::DS_SRC2(const GcnInst& inst, u32 bit_size, IR::SharedMemoryOperation operation) {
+    const auto& ds = inst.control.ds;
+    const IR::U32 address{GetSrc(inst.src[0])};
+    const IR::U32 displacement =
+        (ds.offset1 & 0x80) != 0
+            ? IR::U32{ir.ShiftRightArithmetic(address, ir.Imm32(17u))}
+            : ir.Imm32(static_cast<u32>(
+                  static_cast<s32>(((u32(ds.offset1) << 8u) | u32(ds.offset0)) ^ 0x4000u) -
+                  0x4000));
+    const IR::U32 source = ir.IAdd(address, ir.ShiftLeftLogical(displacement, ir.Imm32(2u)));
+    ir.SharedAtomicSrc2(bit_size, address, source, operation, ds.gds);
+}
+
+void Translator::DS_RMW32(const GcnInst& inst, bool rtn) {
+    const auto& ds = inst.control.ds;
+    const IR::U32 address =
+        ir.IAdd(IR::U32{GetSrc(inst.src[0])}, ir.Imm32((u32(ds.offset1) << 8u) + u32(ds.offset0)));
+    const IR::U32 data0{GetSrc(inst.src[1])};
+    const IR::U32 original = [&] {
+        switch (inst.opcode) {
+        case Opcode::DS_RSUB_U32:
+        case Opcode::DS_RSUB_RTN_U32:
+            return ir.SharedAtomicRSub(address, data0, ds.gds);
+        case Opcode::DS_MSKOR_B32:
+        case Opcode::DS_MSKOR_RTN_B32:
+            return ir.SharedAtomicMaskOr(address, data0, IR::U32{GetSrc(inst.src[2])}, ds.gds);
+        case Opcode::DS_WRAP_RTN_B32:
+            return ir.SharedAtomicWrap(address, data0, IR::U32{GetSrc(inst.src[2])}, ds.gds);
+        default:
+            UNREACHABLE();
+        }
+    }();
+    if (rtn) {
+        SetDst(inst.dst[0], original);
+    }
+}
+
+void Translator::DS_WRXCHG32(const GcnInst& inst, bool pair, bool stride64) {
+    const auto& ds = inst.control.ds;
+    const IR::U32 address{GetSrc(inst.src[0])};
+    const IR::U32 data0{GetSrc(inst.src[1])};
+    const IR::U32 data1 = pair ? IR::U32{GetSrc(inst.src[2])} : IR::U32{};
+    const u32 offset0 =
+        pair ? u32(ds.offset0) * (stride64 ? 256u : 4u) : (u32(ds.offset1) << 8u) + u32(ds.offset0);
+    const IR::U32 original0 =
+        ir.SharedAtomicExchange(ir.IAdd(address, ir.Imm32(offset0)), data0, ds.gds);
+    if (pair) {
+        const u32 offset1 = u32(ds.offset1) * (stride64 ? 256u : 4u);
+        const IR::U32 original1 =
+            ir.SharedAtomicExchange(ir.IAdd(address, ir.Imm32(offset1)), data1, ds.gds);
+        const IR::VectorReg dst{inst.dst[0].code};
+        ir.SetVectorReg(dst, original0);
+        ir.SetVectorReg(dst + 1, original1);
+    } else {
+        SetDst(inst.dst[0], original0);
+    }
+}
+
+void Translator::DS_RMW64(const GcnInst& inst, bool rtn) {
+    const auto& ds = inst.control.ds;
+    const IR::U32 address =
+        ir.IAdd(IR::U32{GetSrc(inst.src[0])}, ir.Imm32((u32(ds.offset1) << 8u) + u32(ds.offset0)));
+    const IR::U64 data0{GetSrc64(inst.src[1])};
+    const IR::U64 original = [&] {
+        switch (inst.opcode) {
+        case Opcode::DS_RSUB_U64:
+        case Opcode::DS_RSUB_RTN_U64:
+            return ir.SharedAtomicRSub(address, data0, ds.gds);
+        case Opcode::DS_MSKOR_B64:
+        case Opcode::DS_MSKOR_RTN_B64:
+            return ir.SharedAtomicMaskOr(address, data0, IR::U64{GetSrc64(inst.src[2])}, ds.gds);
+        default:
+            UNREACHABLE();
+        }
+    }();
+    if (rtn) {
+        SetDst64(inst.dst[0], original);
+    }
+}
+
+void Translator::DS_WRXCHG64(const GcnInst& inst, bool pair, bool stride64) {
+    const auto& ds = inst.control.ds;
+    const IR::U32 address{GetSrc(inst.src[0])};
+    const IR::U64 data0{GetSrc64(inst.src[1])};
+    const IR::U64 data1 = pair ? IR::U64{GetSrc64(inst.src[2])} : IR::U64{};
+    const u32 offset0 =
+        pair ? u32(ds.offset0) * (stride64 ? 512u : 8u) : (u32(ds.offset1) << 8u) + u32(ds.offset0);
+    const IR::U64 original0 =
+        ir.SharedAtomicExchange(ir.IAdd(address, ir.Imm32(offset0)), data0, ds.gds);
+    if (pair) {
+        const u32 offset1 = u32(ds.offset1) * (stride64 ? 512u : 8u);
+        const IR::U64 original1 =
+            ir.SharedAtomicExchange(ir.IAdd(address, ir.Imm32(offset1)), data1, ds.gds);
+        const IR::VectorReg dst{inst.dst[0].code};
+        const auto result0 = ir.UnpackUint2x32(original0);
+        const auto result1 = ir.UnpackUint2x32(original1);
+        ir.SetVectorReg(dst, IR::U32{ir.CompositeExtract(result0, 0)});
+        ir.SetVectorReg(dst + 1, IR::U32{ir.CompositeExtract(result0, 1)});
+        ir.SetVectorReg(dst + 2, IR::U32{ir.CompositeExtract(result1, 0)});
+        ir.SetVectorReg(dst + 3, IR::U32{ir.CompositeExtract(result1, 1)});
+    } else {
+        SetDst64(inst.dst[0], original0);
+    }
+}
+
+void Translator::DS_CMPST(int bit_size, bool rtn, const GcnInst& inst, bool is_float) {
     const bool is_gds = inst.control.ds.gds;
     const IR::U32 addr{GetSrc(inst.src[0])};
     const IR::U32 offset =
@@ -183,7 +478,8 @@ void Translator::DS_CMPST(int bit_size, bool rtn, const GcnInst& inst) {
         const IR::U64 cmp_value{GetSrc64(inst.src[1])};
         const IR::U64 write_value{GetSrc64(inst.src[2])};
         const IR::U64 original_val =
-            ir.SharedAtomicCmpSwap(addr_offset, write_value, cmp_value, is_gds);
+            is_float ? ir.SharedAtomicFCmpSwap(addr_offset, write_value, cmp_value, is_gds)
+                     : ir.SharedAtomicCmpSwap(addr_offset, write_value, cmp_value, is_gds);
         if (rtn) {
             SetDst64(inst.dst[0], original_val);
         }
@@ -191,7 +487,8 @@ void Translator::DS_CMPST(int bit_size, bool rtn, const GcnInst& inst) {
         const IR::U32 cmp_value{GetSrc(inst.src[1])};
         const IR::U32 write_value{GetSrc(inst.src[2])};
         const IR::U32 original_val =
-            ir.SharedAtomicCmpSwap(addr_offset, write_value, cmp_value, is_gds);
+            is_float ? ir.SharedAtomicFCmpSwap(addr_offset, write_value, cmp_value, is_gds)
+                     : ir.SharedAtomicCmpSwap(addr_offset, write_value, cmp_value, is_gds);
         if (rtn) {
             SetDst(inst.dst[0], original_val);
         }

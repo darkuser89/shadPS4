@@ -25,6 +25,13 @@ static bool Requires64BitSharedAtomic(const IR::Inst& inst) {
     case IR::Opcode::SharedAtomicAnd64:
     case IR::Opcode::SharedAtomicOr64:
     case IR::Opcode::SharedAtomicXor64:
+    case IR::Opcode::SharedAtomicRSub64:
+    case IR::Opcode::SharedAtomicMaskOr64:
+    case IR::Opcode::SharedAtomicExchange64:
+    case IR::Opcode::SharedAtomicSrc2_64:
+    case IR::Opcode::SharedAtomicIncBound64:
+    case IR::Opcode::SharedAtomicDecBound64:
+    case IR::Opcode::SharedAtomicFCmpSwap64:
     case IR::Opcode::SharedAtomicCmpSwap64:
         return true;
     default:
@@ -67,7 +74,17 @@ void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile) {
         return;
     }
 
+    bool has_memory_source_atomic = false;
+    for (const IR::Block* block : program.blocks) {
+        for (const IR::Inst& inst : block->Instructions()) {
+            has_memory_source_atomic |= inst.GetOpcode() == IR::Opcode::SharedAtomicSrc2_32 ||
+                                        inst.GetOpcode() == IR::Opcode::SharedAtomicSrc2_64;
+        }
+    }
     const auto atomic_types = CalculateSpecialSharedAtomicTypes(program);
+    program.info.uses_shared_memory_lock =
+        profile.needs_software_shared_int64_atomics &&
+        (True(atomic_types & IR::Type::U64) || has_memory_source_atomic);
     if (True(atomic_types & IR::Type::U16) && True(atomic_types & IR::Type::U64)) {
         // If both other atomic types are used, there is nothing to do.
         return;
@@ -98,6 +115,13 @@ void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile) {
                     const IR::U32 bit_offset{
                         ir.IMul(ir.BitwiseAnd(offset, ir.Imm32(2U)), ir.Imm32(8U))};
                     const IR::U32 dword_offset{ir.BitwiseAnd(offset, ir.Imm32(~3U))};
+                    if (profile.needs_extended_ds_atomics) {
+                        const IR::U32 mask{ir.ShiftLeftLogical(ir.Imm32(0xffffU), bit_offset)};
+                        const IR::U32 data{ir.ShiftLeftLogical(value, bit_offset)};
+                        (void)ir.SharedAtomicMaskOr(dword_offset, mask, data, false);
+                        inst.Invalidate();
+                        continue;
+                    }
                     const IR::U32 dword_value{
                         ir.LoadShared(32, false, ir.BitwiseAnd(offset, dword_offset))};
                     const IR::U32 new_dword_value{

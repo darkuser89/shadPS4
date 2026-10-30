@@ -19,9 +19,9 @@
 #include "input/input_handler.h"
 #include "sdl_window.h"
 #include "src/core/libraries/usbd/usbd.h"
-#include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/presenter.h"
 
-extern std::unique_ptr<Vulkan::Presenter> presenter;
+extern std::unique_ptr<VideoCore::Presenter> presenter;
 
 /**
  * Protocol summary:
@@ -159,18 +159,26 @@ void IPC::InputLoop() {
         } else if (cmd == "SET_FSR") {
             bool use_fsr = next_u64() != 0;
             if (presenter) {
-                presenter->GetFsrSettingsRef().enable = use_fsr;
+                presenter->SetFsrEnabled(use_fsr);
+            }
+        } else if (cmd == "SET_METALFX") {
+            bool use_metal_fx = next_u64() != 0;
+            if (presenter) {
+                if (!use_metal_fx || presenter->SupportsMetalFx()) {
+                    presenter->SetMetalFxEnabled(use_metal_fx);
+                } else {
+                    std::cerr << "MetalFX requires a supported native Metal 4 renderer\n";
+                }
             }
         } else if (cmd == "SET_RCAS") {
             bool use_rcas = next_u64() != 0;
             if (presenter) {
-                presenter->GetFsrSettingsRef().use_rcas = use_rcas;
+                presenter->SetRcasEnabled(use_rcas);
             }
         } else if (cmd == "SET_RCAS_ATTENUATION") {
             int value = static_cast<int>(next_u64());
             if (presenter) {
-                presenter->GetFsrSettingsRef().rcas_attenuation =
-                    static_cast<float>(value / 1000.0f);
+                presenter->SetRcasAttenuation(static_cast<float>(value / 1000.0f));
             }
         } else if (cmd == "USB_LOAD_FIGURE") {
             const auto ref = Libraries::Usbd::usb_backend->GetImplRef();

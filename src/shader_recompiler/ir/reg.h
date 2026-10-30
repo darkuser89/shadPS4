@@ -32,6 +32,34 @@ enum class FloatClassFunc : u32 {
 };
 DECLARE_ENUM_FLAG_OPERATORS(FloatClassFunc)
 
+enum class SharedMemoryOperation : u32 {
+    Add,
+    Subtract,
+    ReverseSubtract,
+    Increment,
+    Decrement,
+    SignedMin,
+    SignedMax,
+    UnsignedMin,
+    UnsignedMax,
+    And,
+    Or,
+    Xor,
+    Write,
+    FloatMin,
+    FloatMax,
+};
+
+enum class MemoryClass : u32 {
+    None = 0,
+    Buffer = 1 << 0,
+    Image = 1 << 1,
+    Shared = 1 << 2,
+    Gds = 1 << 3,
+    All = Buffer | Image | Shared | Gds,
+};
+DECLARE_ENUM_FLAG_OPERATORS(MemoryClass)
+
 union TextureInstInfo {
     u32 raw;
     BitField<0, 1, u32> is_depth;

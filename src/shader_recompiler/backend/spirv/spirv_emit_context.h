@@ -4,6 +4,8 @@
 #pragma once
 
 #include <array>
+#include <functional>
+#include <map>
 #include <unordered_map>
 #include <sirit/sirit.h>
 
@@ -43,10 +45,13 @@ public:
     ~EmitContext();
 
     Id Def(const IR::Value& value);
+    Id EmitGuestPageAtomic(IR::Opcode opcode, u32 handle, Id address, Id value, Id compare);
 
     void DefineBufferProperties();
     void DefineAmdPerVertexAttribs();
     void DefineWorkgroupIndex();
+    void InitializeSharedMemoryLock();
+    Id WithSharedMemoryLock(const std::function<Id()>& operation, bool shared = true);
 
     [[nodiscard]] Id DefineInput(Id type, std::optional<u32> location = std::nullopt,
                                  std::optional<spv::BuiltIn> builtin = std::nullopt) {
@@ -197,6 +202,7 @@ public:
     SwStage sw_stage{};
 
     Id last_label{};
+    Id memory_predicate{};
 
     Id void_id{};
     Id U8{};
@@ -285,6 +291,7 @@ public:
 
     Id shared_memory_u16{};
     Id shared_memory_u32{};
+    Id shared_memory_lock{};
     Id shared_memory_u64{};
 
     Id shared_memory_u16_type{};
@@ -389,6 +396,14 @@ public:
     Id f32_to_uf10{};
 
     Id get_bda_pointer{};
+    Id guest_page_pointer{};
+    Id guest_page_load{};
+    Id guest_page_load_coherent{};
+    Id guest_page_store{};
+    Id guest_page_store_coherent{};
+    std::array<std::array<Id, 2>, 2> guest_page_load_subword{};
+    std::array<std::array<Id, 2>, 2> guest_page_store_subword{};
+    std::map<IR::Opcode, std::array<Id, 2>> guest_page_atomics;
 
     Id read_const{};
     Id read_const_dynamic{};
@@ -415,6 +430,10 @@ private:
     Id DefineUfloatM5ToFloat32(u32 mantissa_bits, std::string_view name);
 
     Id DefineGetBdaPointer();
+    Id DefineGuestPagePointer();
+    Id DefineGuestPageLoad(bool coherent, u32 bits = 32);
+    Id DefineGuestPageStore(bool coherent, u32 bits = 32);
+    Id DefineGuestPageAtomic(IR::Opcode opcode, bool coherent);
 
     Id DefineReadConst(bool dynamic);
 

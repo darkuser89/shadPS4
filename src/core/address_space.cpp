@@ -21,6 +21,10 @@
 #include <sys/mman.h>
 #endif
 
+#ifdef __APPLE__
+#include "video_core/renderer_metal/metal_guest_backing.h"
+#endif
+
 #if defined(__APPLE__) && defined(ARCH_X86_64)
 // Reserve space for the system address space using a zerofill section.
 asm(".zerofill SYSTEM_MANAGED,SYSTEM_MANAGED,__SYSTEM_MANAGED,0x7FFBFC000");
@@ -702,6 +706,11 @@ struct AddressSpace::Impl {
         m_free_regions.insert({user_addr, user_addr + user_size});
 
 #ifdef __APPLE__
+        if (EmulatorSettings.GetRenderer() == "Metal4") {
+            metal_backing = std::make_unique<Metal::GuestBacking>(BackingSize);
+            backing_base = metal_backing->Base();
+            return;
+        }
         const auto shm_path = fmt::format("/BackingDmem{}", getpid());
         backing_fd = shm_open(shm_path.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
         if (backing_fd < 0) {
@@ -745,6 +754,9 @@ struct AddressSpace::Impl {
               int fd = -1) {
         m_free_regions.subtract({virtual_addr, virtual_addr + size});
 #ifdef __APPLE__
+        if (metal_backing && phys_addr != -1 && fd == -1) {
+            return metal_backing->Map(virtual_addr, phys_addr, size, prot);
+        }
         if ((prot & PROT_EXEC) != 0) {
             ASSERT_MSG(fd == -1, "Requested execute permissions for file mapping");
             phys_addr = -1;
@@ -803,6 +815,9 @@ struct AddressSpace::Impl {
         ASSERT_MSG(ret == 0, "mprotect failed: {}", strerror(errno));
     }
 
+#ifdef __APPLE__
+    std::unique_ptr<Metal::GuestBacking> metal_backing;
+#endif
     int backing_fd;
     u8* backing_base{};
     u8* system_managed_base{};

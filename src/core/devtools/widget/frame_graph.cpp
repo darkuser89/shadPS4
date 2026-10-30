@@ -98,11 +98,11 @@ void FrameGraph::Draw() {
              DebugState.gnm_frame_count.load());
         Text("Draw calls: %.0f   Dispatches: %.0f", DebugState.GetDrawCallsAvg(),
              DebugState.GetDispatchesAvg());
-        Text("Game Res: %dx%d", DebugState.game_resolution.first,
-             DebugState.game_resolution.second);
-        Text("Output Res: %dx%d", DebugState.output_resolution.first,
-             DebugState.output_resolution.second);
-        Text("FSR: %s", DebugState.is_using_fsr ? "on" : "off");
+        const auto game_resolution = DebugState.game_resolution.load(std::memory_order_relaxed);
+        const auto output_resolution = DebugState.output_resolution.load(std::memory_order_relaxed);
+        Text("Game Res: %dx%d", game_resolution.width, game_resolution.height);
+        Text("Output Res: %dx%d", output_resolution.width, output_resolution.height);
+        Text("FSR: %s", DebugState.is_using_fsr.load(std::memory_order_relaxed) ? "on" : "off");
     }
     End();
 }

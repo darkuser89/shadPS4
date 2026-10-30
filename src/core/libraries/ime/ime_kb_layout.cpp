@@ -1088,14 +1088,14 @@ ImeViewportMetrics ComputeImeViewportMetrics(bool use_over2k) {
     metrics.size = base_size;
     metrics.offset = base_pos;
 
-    const auto out_res = DebugState.output_resolution;
-    if (out_res.first != 0 && out_res.second != 0) {
+    const auto out_res = DebugState.output_resolution.load(std::memory_order_relaxed);
+    if (out_res.width != 0 && out_res.height != 0) {
         const float fb_scale_x =
             io.DisplayFramebufferScale.x > 0.0f ? io.DisplayFramebufferScale.x : 1.0f;
         const float fb_scale_y =
             io.DisplayFramebufferScale.y > 0.0f ? io.DisplayFramebufferScale.y : 1.0f;
-        const float viewport_w = static_cast<float>(out_res.first) / fb_scale_x;
-        const float viewport_h = static_cast<float>(out_res.second) / fb_scale_y;
+        const float viewport_w = static_cast<float>(out_res.width) / fb_scale_x;
+        const float viewport_h = static_cast<float>(out_res.height) / fb_scale_y;
 
         float offset_x = (base_size.x - viewport_w) * 0.5f;
         float offset_y = (base_size.y - viewport_h) * 0.5f;

@@ -22,11 +22,16 @@
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/presenter.h"
+#include "video_core/renderer_compat.h"
+#ifdef __APPLE__
+#include "video_core/renderer_metal/metal_presenter.h"
+#endif
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
 extern Frontend::WindowSDL* g_window;
-std::unique_ptr<Vulkan::Presenter> presenter;
 std::unique_ptr<AmdGpu::Liverpool> liverpool;
+std::unique_ptr<VideoCore::Presenter> presenter;
 
 namespace Libraries::GnmDriver {
 
@@ -71,8 +76,6 @@ std::mutex m_submit_lock{};
 static u64 frames_submitted{};      // frame counter
 static bool send_init_packet{true}; // initialize HW state before first game's submit in a frame
 static s32 sdk_version{0};
-
-static u32 asc_next_offs_dw[Liverpool::NumComputeRings];
 
 // This address is initialized in sceGnmGetTheTessellationFactorRingBufferBaseAddress
 static VAddr tessellation_factors_ring_addr = -1;
@@ -308,7 +311,7 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
     auto vqid = gnm_vqid - 1;
     auto& asc_queue = liverpool->asc_queues[{vqid}];
 
-    auto& offs_dw = asc_next_offs_dw[vqid];
+    auto& offs_dw = asc_queue.next_offs_dw;
 
     if (next_offs_dw == offs_dw) {
         return;
@@ -326,7 +329,7 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
     const auto acb_size_dw = (next_offs_dw ? next_offs_dw : asc_queue.ring_size_dw) - offs_dw;
     const std::span acb_span{acb_ptr, acb_size_dw};
 
-    asc_next_offs_dw[vqid] = next_offs_dw;
+    offs_dw = next_offs_dw;
 
     if (DebugState.DumpingCurrentFrame()) {
         static auto last_frame_num = -1LL;
@@ -2917,10 +2920,29 @@ int PS4_SYSV_ABI Func_F916890425496553() {
     return ORBIS_OK;
 }
 
+void ShutdownRenderer() {
+#ifdef __APPLE__
+    if (presenter && liverpool) {
+        Metal::ShutdownPresenter(*presenter, *liverpool);
+    }
+#endif
+}
+
 void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LOG_INFO(Lib_GnmDriver, "Initializing presenter");
     liverpool = std::make_unique<AmdGpu::Liverpool>();
-    presenter = std::make_unique<Vulkan::Presenter>(*g_window, liverpool.get());
+    if (EmulatorSettings.GetRenderer() == "Metal4") {
+#ifdef __APPLE__
+        presenter = Metal::CreatePresenter(*g_window, *liverpool);
+#else
+        UNREACHABLE_MSG("Metal 4 requires Apple Silicon and macOS 26 or later");
+#endif
+    } else if (EmulatorSettings.GetRenderer() == "Vulkan") {
+        presenter = VideoCore::AdaptPresenter(
+            std::make_unique<Vulkan::Presenter>(*g_window, liverpool.get()));
+    } else {
+        UNREACHABLE_MSG("Unknown GPU renderer: {}", EmulatorSettings.GetRenderer());
+    }
 
     const s32 result = sceKernelGetCompiledSdkVersion(&sdk_version);
     if (result != ORBIS_OK) {

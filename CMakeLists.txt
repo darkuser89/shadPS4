@@ -8,7 +8,8 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 if(APPLE)
-    list(APPEND ADDITIONAL_LANGUAGES OBJC)
+    list(APPEND ADDITIONAL_LANGUAGES OBJC OBJCXX)
+    set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "macOS host architecture")
     # Minimum OS version for KosmicKrisp
     set(CMAKE_OSX_DEPLOYMENT_TARGET 26.0 CACHE STRING "")
 endif()
@@ -1214,6 +1215,10 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/cache_storage.h
                src/video_core/page_manager.cpp
                src/video_core/page_manager.h
+               src/video_core/presenter.h
+               src/video_core/rasterizer.h
+               src/video_core/renderer_compat.h
+               src/video_core/renderer_compat.cpp
                src/video_core/renderdoc.cpp
                src/video_core/renderdoc.h
 )
@@ -1296,6 +1301,7 @@ set(SHADNET src/shadnet/client.cpp
 )
 if (APPLE)
     list(APPEND EMULATOR src/sdl_window_apple.mm)
+    add_subdirectory(src/video_core/renderer_metal)
 endif()
 
 if(NOT ENABLE_TESTS)
@@ -1320,6 +1326,9 @@ add_executable(shadps4
 create_target_directory_groups(shadps4)
 
 target_link_libraries(shadps4 PRIVATE spdlog::spdlog)
+if (APPLE)
+    target_link_libraries(shadps4 PRIVATE shadps4_metal4)
+endif()
 target_link_libraries(shadps4 PRIVATE magic_enum::magic_enum fmt::fmt toml11::toml11 tsl::robin_map xbyak::xbyak Tracy::TracyClient RenderDoc::API FFmpeg::ffmpeg Dear_ImGui ImGuiFileDialog gcn half::half ZLIB::ZLIB PNG::PNG minimp3)
 target_link_libraries(shadps4 PRIVATE Boost::headers GPUOpen::VulkanMemoryAllocator LibAtrac9 sirit Vulkan::Headers xxHash::xxhash Zydis::Zydis SDL3::SDL3 pugixml::pugixml)
 target_link_libraries(shadps4 PRIVATE stb::headers lfreist-hwinfo::hwinfo nlohmann_json::nlohmann_json miniz::miniz fdk-aac CLI11::CLI11 OpenAL::OpenAL Cpp_Httplib miniupnpc::miniupnpc)

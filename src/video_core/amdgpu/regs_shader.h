@@ -223,6 +223,17 @@ struct ComputeProgram {
         return dim_x * dim_y * dim_z;
     }
 
+    std::array<u32, 3> WorkgroupStart() const noexcept {
+        return dispatch_initiator & (1u << 2) ? std::array<u32, 3>{}
+                                              : std::array{start_x, start_y, start_z};
+    }
+
+    std::array<u32, 3> WorkgroupExtent() const noexcept {
+        const auto start = WorkgroupStart();
+        return {dim_x > start[0] ? dim_x - start[0] : 0, dim_y > start[1] ? dim_y - start[1] : 0,
+                dim_z > start[2] ? dim_z - start[2] : 0};
+    }
+
     bool IsTgidEnabled(u32 i) const noexcept {
         return (settings.tgid_enable >> i) & 1;
     }

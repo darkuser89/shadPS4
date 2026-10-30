@@ -248,11 +248,11 @@ struct RuntimeInfo {
         AmdGpu::FpDenormMode fp_denorm_mode16_64 : 2;
         AmdGpu::FpRoundMode fp_round_mode32 : 2;
         AmdGpu::FpRoundMode fp_round_mode16_64 : 2;
-        u32 num_allocated_vgprs : 8;
+        u32 num_allocated_vgprs : 9;
         u32 num_user_data : 5;
         u32 num_input_vgprs : 2;
         u32 dx10_clamp : 1;
-        u32 reserved : 8;
+        u32 reserved : 7;
         bool operator==(const Properties&) const noexcept = default;
     } props;
     union SwInfo {

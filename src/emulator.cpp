@@ -36,6 +36,7 @@
 #include "core/file_format/psf.h"
 #include "core/file_format/trp.h"
 #include "core/file_sys/fs.h"
+#include "core/libraries/gnmdriver/gnmdriver.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/np/np_handler.h"
@@ -90,6 +91,7 @@ void Emulator::Shutdown() {
     if (exit_done) {
         return;
     }
+    Libraries::GnmDriver::ShutdownRenderer();
     Common::Log::Flush();
     Libraries::SaveData::Backup::StopThread();
     Storage::DataBase::Instance().Close();
@@ -564,7 +566,9 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     linker = Common::Singleton<Core::Linker>::Instance();
 
     // Load renderdoc module
-    VideoCore::LoadRenderDoc();
+    if (EmulatorSettings.GetRenderer() == "Vulkan") {
+        VideoCore::LoadRenderDoc();
+    }
 
     // Initialize patcher
     if (!id.empty()) {
@@ -780,6 +784,7 @@ void Emulator::Restart(std::filesystem::path eboot_path,
     args.insert(guest_args, {"--wait-for-pid", std::to_string(Debugger::GetCurrentPid())});
 
     LOG_INFO(Common, "Relaunching the emulator with args: {}", fmt::join(args, " "));
+    Libraries::GnmDriver::ShutdownRenderer();
     Libraries::Np::NpHandler::GetInstance().Shutdown();
     Common::Log::Shutdown();
 

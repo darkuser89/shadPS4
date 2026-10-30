@@ -10,7 +10,7 @@
 
 namespace Shader::IR {
 
-Inst::Inst(IR::Opcode op_, u32 flags_) noexcept : op{op_}, flags{flags_} {
+Inst::Inst(IR::Opcode op_, u64 flags_) noexcept : op{op_}, flags{flags_} {
     if (op == Opcode::Phi) {
         std::construct_at(&phi_args);
     } else {
@@ -40,6 +40,8 @@ bool Inst::MayHaveSideEffects() const noexcept {
     case Opcode::Barrier:
     case Opcode::WorkgroupMemoryBarrier:
     case Opcode::DeviceMemoryBarrier:
+    case Opcode::BeginMemoryAccess:
+    case Opcode::EndMemoryAccess:
     case Opcode::SubgroupBarrier:
     case Opcode::ConditionRef:
     case Opcode::Prologue:
@@ -80,7 +82,24 @@ bool Inst::MayHaveSideEffects() const noexcept {
     case Opcode::BufferAtomicOr32:
     case Opcode::BufferAtomicXor32:
     case Opcode::BufferAtomicSwap32:
+    case Opcode::BufferAtomicRSub32:
+    case Opcode::BufferAtomicMaskOr32:
+    case Opcode::BufferAtomicWrap32:
+    case Opcode::BufferAtomicFCmpSwapRaw32:
     case Opcode::BufferAtomicCmpSwap32:
+    case Opcode::BufferAtomicISub64:
+    case Opcode::BufferAtomicAnd64:
+    case Opcode::BufferAtomicOr64:
+    case Opcode::BufferAtomicXor64:
+    case Opcode::BufferAtomicSwap64:
+    case Opcode::BufferAtomicSrc2_32:
+    case Opcode::BufferAtomicSrc2_64:
+    case Opcode::BufferAtomicRSub64:
+    case Opcode::BufferAtomicMaskOr64:
+    case Opcode::BufferAtomicInc64:
+    case Opcode::BufferAtomicDec64:
+    case Opcode::BufferAtomicFCmpSwapRaw64:
+    case Opcode::BufferAtomicCmpSwap64:
     case Opcode::BufferAtomicFCmpSwap32:
     case Opcode::WriteSharedU16:
     case Opcode::WriteSharedU32:
@@ -107,7 +126,20 @@ bool Inst::MayHaveSideEffects() const noexcept {
     case Opcode::SharedAtomicAnd64:
     case Opcode::SharedAtomicOr64:
     case Opcode::SharedAtomicXor64:
+    case Opcode::SharedAtomicRSub32:
+    case Opcode::SharedAtomicMaskOr32:
+    case Opcode::SharedAtomicWrap32:
+    case Opcode::SharedAtomicExchange32:
+    case Opcode::SharedAtomicFCmpSwap32:
     case Opcode::SharedAtomicCmpSwap32:
+    case Opcode::SharedAtomicRSub64:
+    case Opcode::SharedAtomicMaskOr64:
+    case Opcode::SharedAtomicExchange64:
+    case Opcode::SharedAtomicSrc2_32:
+    case Opcode::SharedAtomicSrc2_64:
+    case Opcode::SharedAtomicIncBound64:
+    case Opcode::SharedAtomicDecBound64:
+    case Opcode::SharedAtomicFCmpSwap64:
     case Opcode::SharedAtomicCmpSwap64:
     case Opcode::ImageWrite:
     case Opcode::ImageAtomicIAdd32:
@@ -124,9 +156,12 @@ bool Inst::MayHaveSideEffects() const noexcept {
     case Opcode::ImageAtomicXor32:
     case Opcode::ImageAtomicExchange32:
     case Opcode::ImageAtomicCmpSwap32:
+    case Opcode::ImageAtomicFCmpSwap32:
     case Opcode::DebugPrint:
     case Opcode::EmitVertex:
     case Opcode::EmitPrimitive:
+    case Opcode::EmitVertexMasked:
+    case Opcode::EmitPrimitiveMasked:
         return true;
     default:
         return false;

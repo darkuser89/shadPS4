@@ -3,7 +3,11 @@
 
 #pragma once
 
+#include <functional>
+#include <map>
+#include <memory>
 #include <span>
+#include <unordered_map>
 #include <vector>
 #include <boost/container/static_vector.hpp>
 #include "common/assert.h"
@@ -24,6 +28,16 @@ struct Archive;
 }
 
 namespace Shader {
+
+namespace IR {
+class Inst;
+enum class Opcode;
+}
+
+namespace Gcn {
+struct VertexAttribute;
+struct FetchShaderData;
+} // namespace Gcn
 
 enum class Qualifier : u8 {
     None,
@@ -102,7 +116,15 @@ struct Info : InfoPersistent {
 
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
+    std::unordered_map<const IR::Inst*, SharpLocation> flatbuf_sharp_locations;
     PersistentSrtInfo srt_info;
+    std::function<void(VAddr, u64)> prepare_memory_read;
+    std::function<std::span<const u32>(u32)> read_fetch_shader;
+    std::function<bool(const Gcn::VertexAttribute&, const Gcn::FetchShaderData&, const Info&)>
+        supports_vertex_attribute;
+    PFN_SrtWalkerWithMemoryRead walker_with_memory_read{};
+    std::shared_ptr<void> walker_code_owner;
+    std::span<const u8> walker_code;
 
     AttributeFlags loads{};
     AttributeFlags stores{};
@@ -130,7 +152,10 @@ struct Info : InfoPersistent {
     bool uses_pack_10_11_11{};
     bool uses_unpack_10_11_11{};
     bool uses_buffer_int64_atomics{};
+    bool uses_guest_page_reads{};
+    std::map<IR::Opcode, u8> guest_page_atomics;
     bool uses_shared_int64_atomics{};
+    bool uses_shared_memory_lock{};
     bool stores_tess_level_outer{};
     bool stores_tess_level_inner{};
     bool translation_failed{};
@@ -148,12 +173,15 @@ struct Info : InfoPersistent {
     }
 
     template <typename T>
-    T ReadUdReg(u32 ptr_index, u32 dword_offset) const noexcept {
+    T ReadUdReg(u32 ptr_index, u32 dword_offset) const {
         T data;
         const u32* base = user_data.data();
         if (ptr_index != IR::NumScalarRegs) {
             std::memcpy(&base, &user_data[ptr_index], sizeof(base));
             base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
+            if (prepare_memory_read) {
+                prepare_memory_read(VAddr(base) + u64{dword_offset} * sizeof(u32), sizeof(T));
+            }
         }
         std::memcpy(&data, base + dword_offset, sizeof(T));
         return data;
@@ -168,7 +196,14 @@ struct Info : InfoPersistent {
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
-        if (srt_info.walker_func) {
+        if (walker_with_memory_read) {
+            const auto walker_owner = walker_code_owner;
+            SrtMemoryRead context{prepare_memory_read, {}};
+            walker_with_memory_read(user_data.data(), flattened_ud_buf.data(), &context);
+            if (context.error) {
+                std::rethrow_exception(context.error);
+            }
+        } else if (srt_info.walker_func) {
             srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
         }
     }

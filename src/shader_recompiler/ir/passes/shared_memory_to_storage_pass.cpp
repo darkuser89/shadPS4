@@ -7,7 +7,7 @@
 
 namespace Shader::Optimization {
 
-static bool IsSharedAccess(const IR::Inst& inst) {
+bool IsSharedMemoryInstruction(const IR::Inst& inst) {
     const auto opcode = inst.GetOpcode();
     switch (opcode) {
     case IR::Opcode::LoadSharedU16:
@@ -38,7 +38,20 @@ static bool IsSharedAccess(const IR::Inst& inst) {
     case IR::Opcode::SharedAtomicAnd64:
     case IR::Opcode::SharedAtomicOr64:
     case IR::Opcode::SharedAtomicXor64:
+    case IR::Opcode::SharedAtomicRSub32:
+    case IR::Opcode::SharedAtomicMaskOr32:
+    case IR::Opcode::SharedAtomicWrap32:
+    case IR::Opcode::SharedAtomicExchange32:
+    case IR::Opcode::SharedAtomicSrc2_32:
+    case IR::Opcode::SharedAtomicFCmpSwap32:
     case IR::Opcode::SharedAtomicCmpSwap32:
+    case IR::Opcode::SharedAtomicRSub64:
+    case IR::Opcode::SharedAtomicMaskOr64:
+    case IR::Opcode::SharedAtomicExchange64:
+    case IR::Opcode::SharedAtomicSrc2_64:
+    case IR::Opcode::SharedAtomicIncBound64:
+    case IR::Opcode::SharedAtomicDecBound64:
+    case IR::Opcode::SharedAtomicFCmpSwap64:
     case IR::Opcode::SharedAtomicCmpSwap64:
         return true;
     default:
@@ -50,7 +63,7 @@ IR::Type CalculateSharedMemoryTypes(IR::Program& program) {
     IR::Type used_types{IR::Type::Void};
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
-            if (!IsSharedAccess(inst)) {
+            if (!IsSharedMemoryInstruction(inst)) {
                 continue;
             }
             switch (inst.GetOpcode()) {
@@ -71,6 +84,12 @@ IR::Type CalculateSharedMemoryTypes(IR::Program& program) {
             case IR::Opcode::SharedAtomicAnd32:
             case IR::Opcode::SharedAtomicOr32:
             case IR::Opcode::SharedAtomicXor32:
+            case IR::Opcode::SharedAtomicRSub32:
+            case IR::Opcode::SharedAtomicMaskOr32:
+            case IR::Opcode::SharedAtomicWrap32:
+            case IR::Opcode::SharedAtomicExchange32:
+            case IR::Opcode::SharedAtomicSrc2_32:
+            case IR::Opcode::SharedAtomicFCmpSwap32:
             case IR::Opcode::SharedAtomicCmpSwap32:
                 used_types |= IR::Type::U32;
                 break;
@@ -87,6 +106,13 @@ IR::Type CalculateSharedMemoryTypes(IR::Program& program) {
             case IR::Opcode::SharedAtomicAnd64:
             case IR::Opcode::SharedAtomicOr64:
             case IR::Opcode::SharedAtomicXor64:
+            case IR::Opcode::SharedAtomicRSub64:
+            case IR::Opcode::SharedAtomicMaskOr64:
+            case IR::Opcode::SharedAtomicExchange64:
+            case IR::Opcode::SharedAtomicSrc2_64:
+            case IR::Opcode::SharedAtomicIncBound64:
+            case IR::Opcode::SharedAtomicDecBound64:
+            case IR::Opcode::SharedAtomicFCmpSwap64:
             case IR::Opcode::SharedAtomicCmpSwap64:
                 used_types |= IR::Type::U64;
                 break;
@@ -109,11 +135,14 @@ void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_
     // * One of the following is true:
     //   * Requested shared memory size is too large for the host shared memory.
     //   * Workgroup explicit memory is not supported and multiple shared memory types are used.
-    const u32 shared_memory_size = runtime_info.hw.cs.shared_memory_size;
+    const u32 shared_memory_size =
+        runtime_info.hw.cs.shared_memory_size + program.info.shared_memory_scratch_size;
     const auto used_types = CalculateSharedMemoryTypes(program);
-    if (used_types == IR::Type::Void || (shared_memory_size <= profile.max_shared_memory_size &&
-                                         (profile.supports_workgroup_explicit_memory_layout ||
-                                          std::popcount(static_cast<u32>(used_types)) == 1))) {
+    const u32 lock_size = program.info.uses_shared_memory_lock ? sizeof(u32) : 0;
+    if (used_types == IR::Type::Void ||
+        (shared_memory_size + lock_size <= profile.max_shared_memory_size &&
+         (profile.supports_workgroup_explicit_memory_layout ||
+          std::popcount(static_cast<u32>(used_types)) == 1))) {
         return;
     }
 
@@ -127,7 +156,7 @@ void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_
 
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
-            if (!IsSharedAccess(inst)) {
+            if (!IsSharedMemoryInstruction(inst)) {
                 continue;
             }
             IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
@@ -136,6 +165,15 @@ void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_
                                            ir.Imm32(shared_memory_size));
             const IR::U32 address = ir.IAdd(IR::U32{inst.Arg(0)}, offset);
             switch (inst.GetOpcode()) {
+            case IR::Opcode::SharedAtomicSrc2_32:
+            case IR::Opcode::SharedAtomicSrc2_64: {
+                const u32 bit_size = inst.GetOpcode() == IR::Opcode::SharedAtomicSrc2_64 ? 64 : 32;
+                ir.BufferAtomicSrc2(bit_size, handle, address,
+                                    ir.IAdd(IR::U32{inst.Arg(1)}, offset),
+                                    static_cast<IR::SharedMemoryOperation>(inst.Arg(2).U32()));
+                inst.Invalidate();
+                continue;
+            }
             case IR::Opcode::SharedAtomicIAdd32:
             case IR::Opcode::SharedAtomicIAdd64:
                 inst.ReplaceUsesWithAndRemove(
@@ -167,10 +205,12 @@ void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_
                 continue;
             }
             case IR::Opcode::SharedAtomicInc32:
-                inst.ReplaceUsesWithAndRemove(ir.BufferAtomicInc(handle, address, {}));
+                inst.ReplaceUsesWithAndRemove(
+                    ir.BufferAtomicInc(handle, address, IR::U32{inst.Arg(1)}, {}));
                 continue;
             case IR::Opcode::SharedAtomicDec32:
-                inst.ReplaceUsesWithAndRemove(ir.BufferAtomicDec(handle, address, {}));
+                inst.ReplaceUsesWithAndRemove(
+                    ir.BufferAtomicDec(handle, address, IR::U32{inst.Arg(1)}, {}));
                 continue;
             case IR::Opcode::SharedAtomicAnd32:
             case IR::Opcode::SharedAtomicAnd64:
@@ -183,6 +223,47 @@ void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_
             case IR::Opcode::SharedAtomicXor32:
             case IR::Opcode::SharedAtomicXor64:
                 inst.ReplaceUsesWithAndRemove(ir.BufferAtomicXor(handle, address, inst.Arg(1), {}));
+                continue;
+            case IR::Opcode::SharedAtomicRSub64:
+                inst.ReplaceUsesWithAndRemove(
+                    ir.BufferAtomicRSub(handle, address, IR::U64{inst.Arg(1)}, {}));
+                continue;
+            case IR::Opcode::SharedAtomicMaskOr64:
+                inst.ReplaceUsesWithAndRemove(ir.BufferAtomicMaskOr(
+                    handle, address, IR::U64{inst.Arg(1)}, IR::U64{inst.Arg(2)}, {}));
+                continue;
+            case IR::Opcode::SharedAtomicExchange64:
+                inst.ReplaceUsesWithAndRemove(
+                    ir.BufferAtomicSwap(handle, address, IR::U64{inst.Arg(1)}, {}));
+                continue;
+            case IR::Opcode::SharedAtomicIncBound64:
+                inst.ReplaceUsesWithAndRemove(
+                    ir.BufferAtomicInc(handle, address, IR::U64{inst.Arg(1)}, {}));
+                continue;
+            case IR::Opcode::SharedAtomicDecBound64:
+                inst.ReplaceUsesWithAndRemove(
+                    ir.BufferAtomicDec(handle, address, IR::U64{inst.Arg(1)}, {}));
+                continue;
+            case IR::Opcode::SharedAtomicRSub32:
+                inst.ReplaceUsesWithAndRemove(
+                    ir.BufferAtomicRSub(handle, address, IR::U32{inst.Arg(1)}, {}));
+                continue;
+            case IR::Opcode::SharedAtomicMaskOr32:
+                inst.ReplaceUsesWithAndRemove(ir.BufferAtomicMaskOr(
+                    handle, address, IR::U32{inst.Arg(1)}, IR::U32{inst.Arg(2)}, {}));
+                continue;
+            case IR::Opcode::SharedAtomicWrap32:
+                inst.ReplaceUsesWithAndRemove(ir.BufferAtomicWrap(
+                    handle, address, IR::U32{inst.Arg(1)}, IR::U32{inst.Arg(2)}, {}));
+                continue;
+            case IR::Opcode::SharedAtomicExchange32:
+                inst.ReplaceUsesWithAndRemove(
+                    ir.BufferAtomicSwap(handle, address, inst.Arg(1), {}));
+                continue;
+            case IR::Opcode::SharedAtomicFCmpSwap32:
+            case IR::Opcode::SharedAtomicFCmpSwap64:
+                inst.ReplaceUsesWithAndRemove(
+                    ir.BufferAtomicFCmpSwapRaw(handle, address, inst.Arg(1), inst.Arg(2), {}));
                 continue;
             case IR::Opcode::SharedAtomicCmpSwap32:
             case IR::Opcode::SharedAtomicCmpSwap64:

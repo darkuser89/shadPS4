@@ -27,49 +27,54 @@ static bool IsBufferFormatStore(const IR::Inst& inst) {
 }
 
 static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, const IR::U32 address,
-                                  const IR::BufferInstInfo info, const FormatInfo& format_info) {
+                                  const IR::BufferInstInfo info, const FormatInfo& format_info,
+                                  const IR::Value& guest_address) {
     IR::Value interpreted;
     switch (format_info.data_format) {
     case AmdGpu::DataFormat::FormatInvalid:
         interpreted = ir.Imm32(0.f);
         break;
     case AmdGpu::DataFormat::Format8: {
-        const auto raw = ir.UConvert(32, ir.LoadBufferU8(handle, address, info));
+        const auto raw = ir.UConvert(32, ir.LoadBufferU8(handle, address, info, guest_address));
         const auto unpacked = ir.Unpack4x8(format_info.num_format, raw);
         interpreted = ir.CompositeExtract(unpacked, 0);
         break;
     }
     case AmdGpu::DataFormat::Format8_8: {
-        const auto raw = ir.UConvert(32, ir.LoadBufferU16(handle, address, info));
+        const auto raw = ir.UConvert(32, ir.LoadBufferU16(handle, address, info, guest_address));
         const auto unpacked = ir.Unpack4x8(format_info.num_format, raw);
         interpreted = ir.CompositeConstruct(ir.CompositeExtract(unpacked, 0),
                                             ir.CompositeExtract(unpacked, 1));
         break;
     }
     case AmdGpu::DataFormat::Format8_8_8_8:
-        interpreted = ir.Unpack4x8(format_info.num_format,
-                                   IR::U32{ir.LoadBufferU32(1, handle, address, info)});
+        interpreted =
+            ir.Unpack4x8(format_info.num_format,
+                         IR::U32{ir.LoadBufferU32(1, handle, address, info, guest_address)});
         break;
     case AmdGpu::DataFormat::Format16: {
-        const auto raw = ir.UConvert(32, ir.LoadBufferU16(handle, address, info));
+        const auto raw = ir.UConvert(32, ir.LoadBufferU16(handle, address, info, guest_address));
         const auto unpacked = ir.Unpack2x16(format_info.num_format, raw);
         interpreted = ir.CompositeExtract(unpacked, 0);
         break;
     }
     case AmdGpu::DataFormat::Format16_16:
-        interpreted = ir.Unpack2x16(format_info.num_format,
-                                    IR::U32{ir.LoadBufferU32(1, handle, address, info)});
+        interpreted =
+            ir.Unpack2x16(format_info.num_format,
+                          IR::U32{ir.LoadBufferU32(1, handle, address, info, guest_address)});
         break;
     case AmdGpu::DataFormat::Format10_11_11:
-        interpreted = ir.Unpack10_11_11(format_info.num_format,
-                                        IR::U32{ir.LoadBufferU32(1, handle, address, info)});
+        interpreted =
+            ir.Unpack10_11_11(format_info.num_format,
+                              IR::U32{ir.LoadBufferU32(1, handle, address, info, guest_address)});
         break;
     case AmdGpu::DataFormat::Format2_10_10_10:
-        interpreted = ir.Unpack2_10_10_10(format_info.num_format,
-                                          IR::U32{ir.LoadBufferU32(1, handle, address, info)});
+        interpreted =
+            ir.Unpack2_10_10_10(format_info.num_format,
+                                IR::U32{ir.LoadBufferU32(1, handle, address, info, guest_address)});
         break;
     case AmdGpu::DataFormat::Format16_16_16_16: {
-        const auto raw = ir.LoadBufferU32(2, handle, address, info);
+        const auto raw = ir.LoadBufferU32(2, handle, address, info, guest_address);
         interpreted = ir.CompositeConstruct(
             ir.Unpack2x16(format_info.num_format, IR::U32{ir.CompositeExtract(raw, 0)}),
             ir.Unpack2x16(format_info.num_format, IR::U32{ir.CompositeExtract(raw, 1)}));
@@ -82,7 +87,8 @@ static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, con
         ASSERT(format_info.num_format == AmdGpu::NumberFormat::Uint ||
                format_info.num_format == AmdGpu::NumberFormat::Sint ||
                format_info.num_format == AmdGpu::NumberFormat::Float);
-        interpreted = ir.LoadBufferF32(format_info.num_components, handle, address, info);
+        interpreted =
+            ir.LoadBufferF32(format_info.num_components, handle, address, info, guest_address);
         break;
     }
     default:
@@ -108,7 +114,7 @@ static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, con
 
 static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const IR::U32 address,
                               const IR::Value& value, const IR::BufferInstInfo info,
-                              const FormatInfo& format_info) {
+                              const FormatInfo& format_info, const IR::Value& guest_address) {
     // Extract actual number of components and apply additional modifications.
     const auto swizzled = ApplySwizzle(ir, value, format_info.swizzle.Inverse());
     boost::container::static_vector<IR::Value, 4> components;
@@ -126,7 +132,7 @@ static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const I
         const auto packed =
             ir.Pack4x8(format_info.num_format, ir.CompositeConstruct(real_value, ir.Imm32(0.f),
                                                                      ir.Imm32(0.f), ir.Imm32(0.f)));
-        ir.StoreBufferU8(handle, address, ir.UConvert(8, packed), info);
+        ir.StoreBufferU8(handle, address, ir.UConvert(8, packed), info, guest_address);
         break;
     }
     case AmdGpu::DataFormat::Format8_8: {
@@ -134,33 +140,33 @@ static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const I
                                        ir.CompositeConstruct(ir.CompositeExtract(real_value, 0),
                                                              ir.CompositeExtract(real_value, 1),
                                                              ir.Imm32(0.f), ir.Imm32(0.f)));
-        ir.StoreBufferU16(handle, address, ir.UConvert(16, packed), info);
+        ir.StoreBufferU16(handle, address, ir.UConvert(16, packed), info, guest_address);
         break;
     }
     case AmdGpu::DataFormat::Format8_8_8_8: {
         auto packed = ir.Pack4x8(format_info.num_format, real_value);
-        ir.StoreBufferU32(1, handle, address, packed, info);
+        ir.StoreBufferU32(1, handle, address, packed, info, guest_address);
         break;
     }
     case AmdGpu::DataFormat::Format16: {
         const auto packed =
             ir.Pack2x16(format_info.num_format, ir.CompositeConstruct(real_value, ir.Imm32(0.f)));
-        ir.StoreBufferU16(handle, address, ir.UConvert(16, packed), info);
+        ir.StoreBufferU16(handle, address, ir.UConvert(16, packed), info, guest_address);
         break;
     }
     case AmdGpu::DataFormat::Format16_16: {
         const auto packed = ir.Pack2x16(format_info.num_format, real_value);
-        ir.StoreBufferU32(1, handle, address, packed, info);
+        ir.StoreBufferU32(1, handle, address, packed, info, guest_address);
         break;
     }
     case AmdGpu::DataFormat::Format10_11_11: {
         const auto packed = ir.Pack10_11_11(format_info.num_format, real_value);
-        ir.StoreBufferU32(1, handle, address, packed, info);
+        ir.StoreBufferU32(1, handle, address, packed, info, guest_address);
         break;
     }
     case AmdGpu::DataFormat::Format2_10_10_10: {
         const auto packed = ir.Pack2_10_10_10(format_info.num_format, real_value);
-        ir.StoreBufferU32(1, handle, address, packed, info);
+        ir.StoreBufferU32(1, handle, address, packed, info, guest_address);
         break;
     }
     case AmdGpu::DataFormat::Format16_16_16_16: {
@@ -171,7 +177,7 @@ static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const I
             ir.Pack2x16(format_info.num_format,
                         ir.CompositeConstruct(ir.CompositeExtract(real_value, 2),
                                               ir.CompositeExtract(real_value, 3))));
-        ir.StoreBufferU32(2, handle, address, packed, info);
+        ir.StoreBufferU32(2, handle, address, packed, info, guest_address);
         break;
     }
     case AmdGpu::DataFormat::Format32:
@@ -181,7 +187,8 @@ static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const I
         ASSERT(format_info.num_format == AmdGpu::NumberFormat::Uint ||
                format_info.num_format == AmdGpu::NumberFormat::Sint ||
                format_info.num_format == AmdGpu::NumberFormat::Float);
-        ir.StoreBufferF32(format_info.num_components, handle, address, real_value, info);
+        ir.StoreBufferF32(format_info.num_components, handle, address, real_value, info,
+                          guest_address);
         break;
     }
     default:
@@ -224,11 +231,12 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
     }
 
     if (IsBufferFormatLoad(inst)) {
-        const auto interpreted =
-            LoadBufferFormat(ir, inst.Arg(0), IR::U32{inst.Arg(1)}, flags, format_info);
+        const auto interpreted = LoadBufferFormat(ir, inst.Arg(0), IR::U32{inst.Arg(1)}, flags,
+                                                  format_info, inst.Arg(2));
         inst.ReplaceUsesWithAndRemove(interpreted);
     } else if (IsBufferFormatStore(inst)) {
-        StoreBufferFormat(ir, inst.Arg(0), IR::U32{inst.Arg(1)}, inst.Arg(2), flags, format_info);
+        StoreBufferFormat(ir, inst.Arg(0), IR::U32{inst.Arg(1)}, inst.Arg(2), flags, format_info,
+                          inst.Arg(3));
         inst.Invalidate();
     }
 }

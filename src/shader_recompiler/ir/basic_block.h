@@ -44,7 +44,7 @@ public:
 
     iterator PrependNewInst(iterator insertion_point, const Inst& base_inst);
     iterator PrependNewInst(iterator insertion_point, Opcode op,
-                            std::initializer_list<Value> args = {}, u32 flags = 0);
+                            std::initializer_list<Value> args = {}, u64 flags = 0);
 
     void AddBranch(Block* block);
 

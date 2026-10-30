@@ -11,9 +11,9 @@
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
-#include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/presenter.h"
 
-extern std::unique_ptr<Vulkan::Presenter> presenter;
+extern std::unique_ptr<VideoCore::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 
 namespace Libraries::VideoOut {
@@ -41,68 +41,90 @@ constexpr u32 PixelFormatBpp(PixelFormat pixel_format) {
 }
 
 VideoOutDriver::VideoOutDriver(u32 width, u32 height) {
-    main_port.resolution.full_width = width;
-    main_port.resolution.full_height = height;
-    main_port.resolution.pane_width = width;
-    main_port.resolution.pane_height = height;
+    main_port->resolution.full_width = width;
+    main_port->resolution.full_height = height;
+    main_port->resolution.pane_width = width;
+    main_port->resolution.pane_height = height;
+    std::scoped_lock lock{flip_queue->mutex};
     present_thread = std::jthread([&](std::stop_token token) { PresentThread(token); });
+    present_thread_id = present_thread.get_id();
+    present_stop_source = present_thread.get_stop_source();
 }
 
-VideoOutDriver::~VideoOutDriver() = default;
+VideoOutDriver::~VideoOutDriver() {
+    Stop();
+}
+
+void VideoOutDriver::Stop() {
+    bool is_present_thread;
+    {
+        std::scoped_lock lock{flip_queue->mutex};
+        flip_queue->stopping = true;
+        is_present_thread = present_thread_id == std::this_thread::get_id();
+    }
+    main_port->CancelLabelWaits();
+    present_stop_source.request_stop();
+    if (!is_present_thread) {
+        std::scoped_lock lock{join_mutex};
+        if (present_thread.joinable()) {
+            present_thread.join();
+        }
+    }
+}
 
 int VideoOutDriver::Open(const ServiceThreadParams* params) {
-    if (main_port.is_open) {
+    if (main_port->is_open) {
         return ORBIS_VIDEO_OUT_ERROR_RESOURCE_BUSY;
     }
-    main_port.is_open = true;
-    liverpool->SetVoPort(&main_port);
+    main_port->is_open = true;
+    liverpool->SetVoPort(main_port);
     return 1;
 }
 
 void VideoOutDriver::Close(s32 handle) {
-    std::scoped_lock lock{mutex};
+    std::scoped_lock lock{flip_queue->mutex};
 
     // Mark as closed
-    main_port.is_open = false;
-    main_port.flip_rate = 0;
-    main_port.prev_index = -1;
+    main_port->is_open = false;
+    main_port->flip_rate = 0;
+    main_port->prev_index = -1;
 
     // Clear port information
-    std::memset(main_port.buffer_labels.data(), 0, sizeof(main_port.buffer_labels));
-    std::memset(main_port.groups.data(), 0, sizeof(main_port.groups));
-    std::memset(&main_port.vblank_status, 0, sizeof(main_port.vblank_status));
-    main_port.flip_status = FlipStatus{};
+    std::memset(main_port->buffer_labels.data(), 0, sizeof(main_port->buffer_labels));
+    std::memset(main_port->groups.data(), 0, sizeof(main_port->groups));
+    std::memset(&main_port->vblank_status, 0, sizeof(main_port->vblank_status));
+    main_port->flip_status = FlipStatus{};
 
     // Re-initialize buffers
-    std::memset(main_port.buffer_slots.data(), 0, sizeof(main_port.buffer_slots));
-    for (auto& buffer : main_port.buffer_slots) {
+    std::memset(main_port->buffer_slots.data(), 0, sizeof(main_port->buffer_slots));
+    for (auto& buffer : main_port->buffer_slots) {
         buffer.group_index = -1;
     }
 
     // Clear events
-    for (auto event : main_port.flip_events) {
+    for (auto event : main_port->flip_events) {
         auto equeue = Kernel::GetEqueue(event);
         if (equeue != nullptr) {
             equeue->RemoveEvent(static_cast<u64>(OrbisVideoOutInternalEventId::Flip),
                                 Kernel::OrbisKernelEvent::Filter::VideoOut);
         }
     }
-    main_port.flip_events.clear();
-    for (auto event : main_port.vblank_events) {
+    main_port->flip_events.clear();
+    for (auto event : main_port->vblank_events) {
         auto equeue = Kernel::GetEqueue(event);
         if (equeue != nullptr) {
             equeue->RemoveEvent(static_cast<u64>(OrbisVideoOutInternalEventId::Vblank),
                                 Kernel::OrbisKernelEvent::Filter::VideoOut);
         }
     }
-    main_port.vblank_events.clear();
+    main_port->vblank_events.clear();
 }
 
 VideoOutPort* VideoOutDriver::GetPort(int handle) {
     if (handle != 1) [[unlikely]] {
         return nullptr;
     }
-    return &main_port;
+    return main_port.get();
 }
 
 int VideoOutDriver::RegisterBuffers(VideoOutPort* port, s32 startIndex, void* const* addresses,
@@ -241,7 +263,7 @@ void VideoOutDriver::Flip(const Request& req) {
     presenter->Present(req.frame);
 
     // Update flip status.
-    auto* port = req.port;
+    const auto& port = req.port;
     {
         std::unique_lock lock{port->port_mutex};
         auto& flip_status = port->flip_status;
@@ -279,7 +301,9 @@ void VideoOutDriver::Flip(const Request& req) {
 
 void VideoOutDriver::DrawBlankFrame() {
     const auto empty_frame = presenter->PrepareBlankFrame(true);
-    presenter->Present(empty_frame, false, false);
+    if (empty_frame) {
+        presenter->Present(empty_frame, false, false);
+    }
 }
 
 void VideoOutDriver::DrawLastFrame() {
@@ -291,8 +315,14 @@ void VideoOutDriver::DrawLastFrame() {
 
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
+    const auto queue = flip_queue;
+    const auto port_owner = main_port;
+    ASSERT(port == port_owner.get());
     {
-        std::unique_lock lock{port->port_mutex};
+        std::scoped_lock lock{queue->mutex, port->port_mutex};
+        if (queue->stopping) {
+            return false;
+        }
         if (index != -1 && port->flip_status.flip_pending_num > 16) {
             LOG_ERROR(Lib_VideoOut, "Flip queue is full");
             return false;
@@ -307,16 +337,26 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 
     if (!is_eop) {
         // Non EOP flips can arrive from any thread so ask GPU thread to perform them
-        liverpool->SendCommand([=, this]() { SubmitFlipInternal(port, index, flip_arg, is_eop); });
+        liverpool->SendCommand([queue, port_owner, index, flip_arg, is_eop]() {
+            SubmitFlipInternal(queue, port_owner, index, flip_arg, is_eop);
+        });
     } else {
-        SubmitFlipInternal(port, index, flip_arg, is_eop);
+        SubmitFlipInternal(queue, port_owner, index, flip_arg, is_eop);
     }
 
     return true;
 }
 
-void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
-    Vulkan::Frame* frame;
+void VideoOutDriver::SubmitFlipInternal(const std::shared_ptr<FlipQueue>& queue,
+                                        const std::shared_ptr<VideoOutPort>& port, s32 index,
+                                        s64 flip_arg, bool is_eop) {
+    {
+        std::scoped_lock lock{queue->mutex};
+        if (queue->stopping) {
+            return;
+        }
+    }
+    VideoCore::Frame* frame;
     if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);
     } else {
@@ -326,8 +366,11 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         frame = presenter->PrepareFrame(group, buffer.address_left);
     }
 
-    std::scoped_lock lock{mutex};
-    requests.push({
+    std::scoped_lock lock{queue->mutex};
+    if (queue->stopping || !frame) {
+        return;
+    }
+    queue->requests.push({
         .frame = frame,
         .port = port,
         .flip_arg = flip_arg,
@@ -346,10 +389,10 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     Common::AccurateTimer timer{vblank_period};
 
     const auto receive_request = [this] -> Request {
-        std::scoped_lock lk{mutex};
-        if (!requests.empty()) {
-            const auto request = requests.front();
-            requests.pop();
+        std::scoped_lock lk{flip_queue->mutex};
+        if (!flip_queue->requests.empty()) {
+            const auto request = flip_queue->requests.front();
+            flip_queue->requests.pop();
             return request;
         }
         return {};
@@ -365,12 +408,12 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         }
 
         // Check if it's time to take a request.
-        auto& vblank_status = main_port.vblank_status;
-        if (vblank_status.count % (main_port.flip_rate + 1) == 0) {
+        auto& vblank_status = main_port->vblank_status;
+        if (vblank_status.count % (main_port->flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (!request) {
                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
-                    if (!main_port.is_open) {
+                    if (!main_port->is_open) {
                         DrawBlankFrame();
                     } else if (ImGui::Core::MustKeepDrawing()) {
                         DrawLastFrame();
@@ -384,10 +427,10 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
         {
             // Needs lock here as can be concurrently read by `sceVideoOutGetVblankStatus`
-            std::scoped_lock lock{main_port.vo_mutex};
+            std::scoped_lock lock{main_port->vo_mutex};
 
             // Trigger flip events for the port
-            for (auto event : main_port.vblank_events) {
+            for (auto event : main_port->vblank_events) {
                 auto equeue = Kernel::GetEqueue(event);
                 if (equeue != nullptr) {
                     equeue->TriggerEvent(
@@ -403,11 +446,17 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             vblank_status.count++;
             vblank_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
             vblank_status.tsc = Libraries::Kernel::sceKernelReadTsc();
-            main_port.vblank_cv.notify_all();
+            main_port->vblank_cv.notify_all();
         }
 
         timer.End();
     }
+
+    std::scoped_lock lock{flip_queue->mutex, main_port->port_mutex};
+    flip_queue->requests = {};
+    main_port->flip_status.flip_pending_num = 0;
+    main_port->flip_status.gc_queue_num = 0;
+    present_thread_id = {};
 }
 
 } // namespace Libraries::VideoOut

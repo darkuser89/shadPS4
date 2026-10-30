@@ -63,7 +63,13 @@ void Visit(Info& info, const IR::Inst& inst) {
     case IR::Opcode::SharedAtomicAnd32:
     case IR::Opcode::SharedAtomicOr32:
     case IR::Opcode::SharedAtomicXor32:
+    case IR::Opcode::SharedAtomicFCmpSwap32:
     case IR::Opcode::SharedAtomicCmpSwap32:
+    case IR::Opcode::SharedAtomicRSub32:
+    case IR::Opcode::SharedAtomicMaskOr32:
+    case IR::Opcode::SharedAtomicWrap32:
+    case IR::Opcode::SharedAtomicExchange32:
+    case IR::Opcode::SharedAtomicSrc2_32:
         info.shared_types |= IR::Type::U32;
         break;
     case IR::Opcode::SharedAtomicIAdd64:
@@ -77,8 +83,15 @@ void Visit(Info& info, const IR::Inst& inst) {
     case IR::Opcode::SharedAtomicAnd64:
     case IR::Opcode::SharedAtomicOr64:
     case IR::Opcode::SharedAtomicXor64:
+    case IR::Opcode::SharedAtomicRSub64:
+    case IR::Opcode::SharedAtomicMaskOr64:
+    case IR::Opcode::SharedAtomicExchange64:
+    case IR::Opcode::SharedAtomicSrc2_64:
+    case IR::Opcode::SharedAtomicIncBound64:
+    case IR::Opcode::SharedAtomicDecBound64:
+    case IR::Opcode::SharedAtomicFCmpSwap64:
     case IR::Opcode::SharedAtomicCmpSwap64:
-        info.uses_shared_int64_atomics = true;
+        info.uses_shared_int64_atomics = !info.uses_shared_memory_lock;
         [[fallthrough]];
     case IR::Opcode::LoadSharedU64:
     case IR::Opcode::WriteSharedU64:
@@ -132,12 +145,27 @@ void Visit(Info& info, const IR::Inst& inst) {
     case IR::Opcode::BufferAtomicFMin32:
         info.uses_buffer_atomic_float_min_max = true;
         break;
+    case IR::Opcode::BufferAtomicISub64:
+    case IR::Opcode::BufferAtomicAnd64:
+    case IR::Opcode::BufferAtomicOr64:
+    case IR::Opcode::BufferAtomicXor64:
+    case IR::Opcode::BufferAtomicSwap64:
+    case IR::Opcode::BufferAtomicSrc2_64:
+    case IR::Opcode::BufferAtomicRSub64:
+    case IR::Opcode::BufferAtomicMaskOr64:
+    case IR::Opcode::BufferAtomicInc64:
+    case IR::Opcode::BufferAtomicDec64:
+    case IR::Opcode::BufferAtomicFCmpSwapRaw64:
+    case IR::Opcode::BufferAtomicCmpSwap64:
     case IR::Opcode::BufferAtomicIAdd64:
     case IR::Opcode::BufferAtomicSMax64:
     case IR::Opcode::BufferAtomicSMin64:
     case IR::Opcode::BufferAtomicUMax64:
     case IR::Opcode::BufferAtomicUMin64:
-        info.uses_buffer_int64_atomics = true;
+        if (!info.uses_shared_memory_lock ||
+            info.buffers[inst.Arg(0).U32()].buffer_type != BufferType::SharedMemory) {
+            info.uses_buffer_int64_atomics = true;
+        }
         break;
     case IR::Opcode::DataAppend:
     case IR::Opcode::DataConsume:
@@ -173,6 +201,11 @@ void Visit(Info& info, const IR::Inst& inst) {
 
 void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
     Info& info = program.info;
+    if (info.uses_shared_memory_lock) {
+        for (u32 component = 0; component < 3; ++component) {
+            info.loads.Set(IR::Attribute::LocalInvocationId, component);
+        }
+    }
     for (IR::Block* const block : program.post_order_blocks) {
         for (IR::Inst& inst : block->Instructions()) {
             Visit(info, inst);

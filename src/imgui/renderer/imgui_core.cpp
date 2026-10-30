@@ -61,10 +61,7 @@ bool IsGamepadInputCaptured() {
     return force_gamepad_input_capture_count.load(std::memory_order_relaxed) > 0;
 }
 
-void Initialize(const ::Vulkan::Instance& instance, const Frontend::WindowSDL& window,
-                const u32 image_count, vk::Format surface_format,
-                const vk::AllocationCallbacks* allocator) {
-
+static void InitializeContext(const Frontend::WindowSDL& window, u32 max_texture_dimension) {
     const auto config_path = GetUserPath(Common::FS::PathType::UserDir) / "imgui.ini";
     const auto log_path = GetUserPath(Common::FS::PathType::LogDir) / "imgui_log.txt";
 
@@ -106,7 +103,7 @@ void Initialize(const ::Vulkan::Instance& instance, const Frontend::WindowSDL& w
 
     // Let the atlas size grow to the largest image the device can create,
     // floored to the power of two the packer requires.
-    const u32 max_dim = instance.GetPhysicalDevice().getProperties().limits.maxImageDimension2D;
+    const u32 max_dim = max_texture_dimension;
     const int atlas_max = static_cast<int>(std::bit_floor(std::max<u32>(max_dim, 512u)));
     io.Fonts->TexMaxWidth = atlas_max;
     io.Fonts->TexMaxHeight = atlas_max;
@@ -118,6 +115,22 @@ void Initialize(const ::Vulkan::Instance& instance, const Frontend::WindowSDL& w
     ::Core::Devtools::Layer::SetupSettings();
     Sdl::Init(window.GetSDLWindow());
 
+    char label[32];
+    ImFormatString(label, IM_ARRAYSIZE(label), "WindowOverViewport_%08X", GetMainViewport()->ID);
+    dock_id = ImHashStr(label);
+
+    if (const auto dpi = SDL_GetWindowDisplayScale(window.GetSDLWindow()); dpi > 0.0f) {
+        GetIO().FontGlobalScale *= dpi;
+    }
+
+    std::at_quick_exit([] { SaveIniSettingsToDisk(GetIO().IniFilename); });
+}
+
+void Initialize(const ::Vulkan::Instance& instance, const Frontend::WindowSDL& window,
+                const u32 image_count, vk::Format surface_format,
+                const vk::AllocationCallbacks* allocator) {
+    InitializeContext(window,
+                      instance.GetPhysicalDevice().getProperties().limits.maxImageDimension2D);
     const Vulkan::InitInfo vk_info{
         .instance = instance.GetInstance(),
         .physical_device = instance.GetPhysicalDevice(),
@@ -135,17 +148,12 @@ void Initialize(const ::Vulkan::Instance& instance, const Frontend::WindowSDL& w
     };
     Vulkan::Init(vk_info);
 
-    TextureManager::StartWorker();
+    TextureManager::StartWorker(false);
+}
 
-    char label[32];
-    ImFormatString(label, IM_ARRAYSIZE(label), "WindowOverViewport_%08X", GetMainViewport()->ID);
-    dock_id = ImHashStr(label);
-
-    if (const auto dpi = SDL_GetWindowDisplayScale(window.GetSDLWindow()); dpi > 0.0f) {
-        GetIO().FontGlobalScale *= dpi;
-    }
-
-    std::at_quick_exit([] { SaveIniSettingsToDisk(GetIO().IniFilename); });
+void InitializeNative(const Frontend::WindowSDL& window, u32 max_texture_dimension) {
+    InitializeContext(window, max_texture_dimension);
+    TextureManager::StartWorker(true);
 }
 
 void OnResize() {
@@ -154,6 +162,23 @@ void OnResize() {
 
 void OnSurfaceFormatChange(vk::Format surface_format) {
     Vulkan::OnSurfaceFormatChange(surface_format);
+}
+
+static void DestroyNativeContext() {
+    const ImGuiIO& io = GetIO();
+    const auto ini_filename = (void*)io.IniFilename;
+    const auto log_filename = (void*)io.LogFilename;
+
+    Sdl::Shutdown();
+    DestroyContext();
+
+    delete[] (char*)ini_filename;
+    delete[] (char*)log_filename;
+}
+
+void ShutdownNative() {
+    TextureManager::StopWorker();
+    DestroyNativeContext();
 }
 
 void Shutdown(const vk::Device& device) {
@@ -165,16 +190,8 @@ void Shutdown(const vk::Device& device) {
 
     TextureManager::StopWorker();
 
-    const ImGuiIO& io = GetIO();
-    const auto ini_filename = (void*)io.IniFilename;
-    const auto log_filename = (void*)io.LogFilename;
-
     Vulkan::Shutdown();
-    Sdl::Shutdown();
-    DestroyContext();
-
-    delete[] (char*)ini_filename;
-    delete[] (char*)log_filename;
+    DestroyNativeContext();
 }
 
 bool ProcessEvent(SDL_Event* event) {

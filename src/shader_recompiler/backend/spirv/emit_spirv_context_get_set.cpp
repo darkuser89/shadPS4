@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <stdexcept>
 #include "common/assert.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
@@ -16,6 +17,24 @@ namespace Shader::Backend::SPIRV {
 
 using PointerType = EmitContext::PointerType;
 using PointerSize = EmitContext::PointerSize;
+
+Id EmitGuardBufferAddress(EmitContext&, Id address, Id) {
+    return address;
+}
+
+void EmitBeginMemoryAccess(EmitContext& ctx, Id predicate) {
+    if (!ctx.profile.needs_memory_predication || Sirit::ValidId(ctx.memory_predicate)) {
+        throw std::runtime_error("Invalid predicated memory access scope");
+    }
+    ctx.memory_predicate = predicate;
+}
+
+void EmitEndMemoryAccess(EmitContext& ctx) {
+    if (!Sirit::ValidId(ctx.memory_predicate)) {
+        throw std::runtime_error("Missing predicated memory access scope");
+    }
+    ctx.memory_predicate = {};
+}
 
 static std::pair<Id, bool> OutputAttrComponentType(EmitContext& ctx, IR::Attribute attr) {
     if (IR::IsParam(attr)) {
@@ -64,7 +83,16 @@ Id EmitReadConst(EmitContext& ctx, IR::Inst* inst, Id addr, Id offset) {
     }
 }
 
-Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
+Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index, const IR::Value& guest_address) {
+    if (!guest_address.IsEmpty()) {
+        if (!ctx.profile.guest_page_shift || !Sirit::ValidId(ctx.guest_page_load)) {
+            throw std::runtime_error("Guest page read requires native page-table lowering");
+        }
+        const bool coherent = ctx.info.buffers.at(handle).GetSharp(ctx.info).mtype == 3;
+        return ctx.OpFunctionCall(ctx.U32[1],
+                                  coherent ? ctx.guest_page_load_coherent : ctx.guest_page_load,
+                                  ctx.Def(guest_address));
+    }
     const auto& buffer = ctx.buffers[handle];
     if (const Id offset = buffer.Offset(PointerSize::B32); Sirit::ValidId(offset)) {
         index = ctx.OpIAdd(ctx.U32[1], index, offset);
@@ -382,7 +410,28 @@ void EmitSetPatch(EmitContext& ctx, IR::Patch patch, Id value) {
 }
 
 template <u32 N, PointerType alias>
-static Id EmitLoadBufferB32xN(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
+static Id EmitLoadBufferB32xN(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
+                              const IR::Value& guest_address = {}) {
+    if (!guest_address.IsEmpty()) {
+        if (!ctx.profile.guest_page_shift || !Sirit::ValidId(ctx.guest_page_load)) {
+            throw std::runtime_error("Guest page load requires native lowering");
+        }
+        const auto base = ctx.Def(guest_address);
+        const auto type = alias == PointerType::U32 ? ctx.U32[1] : ctx.F32[1];
+        const bool coherent = ctx.info.buffers.at(handle).GetSharp(ctx.info).mtype == 3;
+        boost::container::static_vector<Id, N> values;
+        for (u32 i = 0; i < N; ++i) {
+            const auto address_i =
+                i ? ctx.OpIAdd(ctx.U64, base, ctx.Constant(ctx.U64, u64{i} * 4)) : base;
+            const auto word = ctx.OpFunctionCall(
+                ctx.U32[1], coherent ? ctx.guest_page_load_coherent : ctx.guest_page_load,
+                address_i);
+            values.push_back(alias == PointerType::U32 ? word : ctx.OpBitcast(type, word));
+        }
+        return N == 1 ? values[0]
+                      : ctx.OpCompositeConstruct(
+                            alias == PointerType::U32 ? ctx.U32[N] : ctx.F32[N], values);
+    }
     const auto& spv_buffer = ctx.buffers[handle];
     if (const Id offset = spv_buffer.Offset(PointerSize::B32); Sirit::ValidId(offset)) {
         address = ctx.OpIAdd(ctx.U32[1], address, offset);
@@ -394,7 +443,9 @@ static Id EmitLoadBufferB32xN(EmitContext& ctx, IR::Inst* inst, u32 handle, Id a
     for (u32 i = 0; i < N; i++) {
         const Id index_i = i == 0 ? address : ctx.OpIAdd(ctx.U32[1], address, ctx.ConstU32(i));
         const Id ptr_i = ctx.OpAccessChain(pointer_type, id, ctx.u32_zero_value, index_i);
-        const Id result_i = ctx.OpLoad(data_types[1], ptr_i);
+        const Id result_i =
+            ctx.WithSharedMemoryLock([&] { return ctx.OpLoad(data_types[1], ptr_i); },
+                                     spv_buffer.buffer_type == BufferType::SharedMemory);
         ids.push_back(result_i);
     }
 
@@ -402,42 +453,71 @@ static Id EmitLoadBufferB32xN(EmitContext& ctx, IR::Inst* inst, u32 handle, Id a
     return result;
 }
 
-Id EmitLoadBufferU8(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
+Id EmitLoadBufferU8(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
+                    const IR::Value& guest_address) {
+    if (!guest_address.IsEmpty()) {
+        const bool coherent = ctx.info.buffers.at(handle).GetSharp(ctx.info).mtype == 3;
+        const auto function = ctx.guest_page_load_subword[0][coherent];
+        if (!ctx.profile.guest_page_shift || !Sirit::ValidId(function)) {
+            throw std::runtime_error("Guest page load requires native subword lowering");
+        }
+        return ctx.OpFunctionCall(ctx.U8, function, ctx.Def(guest_address));
+    }
     const auto& spv_buffer = ctx.buffers[handle];
     if (const Id offset = spv_buffer.Offset(PointerSize::B8); Sirit::ValidId(offset)) {
-        address = ctx.OpIAdd(ctx.U32[1], address, offset);
+        if (ctx.profile.needs_wide_buffer_byte_offsets) {
+            address = ctx.OpIAdd(ctx.U64, ctx.OpUConvert(ctx.U64, address),
+                                 ctx.OpUConvert(ctx.U64, offset));
+        } else {
+            address = ctx.OpIAdd(ctx.U32[1], address, offset);
+        }
     }
     const auto [id, pointer_type] = spv_buffer.Alias(PointerType::U8);
     const Id ptr{ctx.OpAccessChain(pointer_type, id, ctx.u32_zero_value, address)};
-    const Id result{ctx.OpLoad(ctx.U8, ptr)};
+    const Id result{ctx.WithSharedMemoryLock([&] { return ctx.OpLoad(ctx.U8, ptr); },
+                                             spv_buffer.buffer_type == BufferType::SharedMemory)};
     return result;
 }
 
-Id EmitLoadBufferU16(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
+Id EmitLoadBufferU16(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
+                     const IR::Value& guest_address) {
+    if (!guest_address.IsEmpty()) {
+        const bool coherent = ctx.info.buffers.at(handle).GetSharp(ctx.info).mtype == 3;
+        const auto function = ctx.guest_page_load_subword[1][coherent];
+        if (!ctx.profile.guest_page_shift || !Sirit::ValidId(function)) {
+            throw std::runtime_error("Guest page load requires native subword lowering");
+        }
+        return ctx.OpFunctionCall(ctx.U16, function, ctx.Def(guest_address));
+    }
     const auto& spv_buffer = ctx.buffers[handle];
     if (const Id offset = spv_buffer.Offset(PointerSize::B16); Sirit::ValidId(offset)) {
         address = ctx.OpIAdd(ctx.U32[1], address, offset);
     }
     const auto [id, pointer_type] = spv_buffer.Alias(PointerType::U16);
     const Id ptr{ctx.OpAccessChain(pointer_type, id, ctx.u32_zero_value, address)};
-    const Id result{ctx.OpLoad(ctx.U16, ptr)};
+    const Id result{ctx.WithSharedMemoryLock([&] { return ctx.OpLoad(ctx.U16, ptr); },
+                                             spv_buffer.buffer_type == BufferType::SharedMemory)};
     return result;
 }
 
-Id EmitLoadBufferU32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
-    return EmitLoadBufferB32xN<1, PointerType::U32>(ctx, inst, handle, address);
+Id EmitLoadBufferU32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
+                     const IR::Value& guest_address) {
+    return EmitLoadBufferB32xN<1, PointerType::U32>(ctx, inst, handle, address, guest_address);
 }
 
-Id EmitLoadBufferU32x2(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
-    return EmitLoadBufferB32xN<2, PointerType::U32>(ctx, inst, handle, address);
+Id EmitLoadBufferU32x2(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
+                       const IR::Value& guest_address) {
+    return EmitLoadBufferB32xN<2, PointerType::U32>(ctx, inst, handle, address, guest_address);
 }
 
-Id EmitLoadBufferU32x3(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
-    return EmitLoadBufferB32xN<3, PointerType::U32>(ctx, inst, handle, address);
+Id EmitLoadBufferU32x3(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
+                       const IR::Value& guest_address) {
+    return EmitLoadBufferB32xN<3, PointerType::U32>(ctx, inst, handle, address, guest_address);
 }
 
-Id EmitLoadBufferU32x4(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
-    return EmitLoadBufferB32xN<4, PointerType::U32>(ctx, inst, handle, address);
+Id EmitLoadBufferU32x4(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
+                       const IR::Value& guest_address) {
+    return EmitLoadBufferB32xN<4, PointerType::U32>(ctx, inst, handle, address, guest_address);
 }
 
 Id EmitLoadBufferU64(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
@@ -447,33 +527,58 @@ Id EmitLoadBufferU64(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
     }
     const auto [id, pointer_type] = spv_buffer.Alias(PointerType::U64);
     const Id ptr{ctx.OpAccessChain(pointer_type, id, ctx.u64_zero_value, address)};
-    const Id result{ctx.OpLoad(ctx.U64, ptr)};
+    const Id result{ctx.WithSharedMemoryLock([&] { return ctx.OpLoad(ctx.U64, ptr); },
+                                             spv_buffer.buffer_type == BufferType::SharedMemory)};
     return result;
 }
 
-Id EmitLoadBufferF32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
-    return EmitLoadBufferB32xN<1, PointerType::F32>(ctx, inst, handle, address);
+Id EmitLoadBufferF32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
+                     const IR::Value& guest_address) {
+    return EmitLoadBufferB32xN<1, PointerType::F32>(ctx, inst, handle, address, guest_address);
 }
 
-Id EmitLoadBufferF32x2(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
-    return EmitLoadBufferB32xN<2, PointerType::F32>(ctx, inst, handle, address);
+Id EmitLoadBufferF32x2(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
+                       const IR::Value& guest_address) {
+    return EmitLoadBufferB32xN<2, PointerType::F32>(ctx, inst, handle, address, guest_address);
 }
 
-Id EmitLoadBufferF32x3(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
-    return EmitLoadBufferB32xN<3, PointerType::F32>(ctx, inst, handle, address);
+Id EmitLoadBufferF32x3(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
+                       const IR::Value& guest_address) {
+    return EmitLoadBufferB32xN<3, PointerType::F32>(ctx, inst, handle, address, guest_address);
 }
 
-Id EmitLoadBufferF32x4(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
-    return EmitLoadBufferB32xN<4, PointerType::F32>(ctx, inst, handle, address);
+Id EmitLoadBufferF32x4(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
+                       const IR::Value& guest_address) {
+    return EmitLoadBufferB32xN<4, PointerType::F32>(ctx, inst, handle, address, guest_address);
 }
 
-Id EmitLoadBufferFormatF32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
+Id EmitLoadBufferFormatF32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
+                           const IR::Value& guest_address) {
     UNREACHABLE_MSG("SPIR-V instruction");
 }
 
 template <u32 N, PointerType alias>
-static void EmitStoreBufferB32xN(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address,
-                                 Id value) {
+static void EmitStoreBufferB32xN(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value,
+                                 const IR::Value& guest_address = {}) {
+    if (!guest_address.IsEmpty()) {
+        if (!ctx.profile.guest_page_shift || !Sirit::ValidId(ctx.guest_page_store)) {
+            throw std::runtime_error("Guest page store requires native lowering");
+        }
+        const auto base = ctx.Def(guest_address);
+        const auto type = alias == PointerType::U32 ? ctx.U32[1] : ctx.F32[1];
+        const bool coherent = ctx.info.buffers.at(handle).GetSharp(ctx.info).mtype == 3;
+        for (u32 i = 0; i < N; ++i) {
+            const auto address_i =
+                i ? ctx.OpIAdd(ctx.U64, base, ctx.Constant(ctx.U64, u64{i} * 4)) : base;
+            const auto component = N == 1 ? value : ctx.OpCompositeExtract(type, value, i);
+            const auto word =
+                alias == PointerType::U32 ? component : ctx.OpBitcast(ctx.U32[1], component);
+            ctx.OpFunctionCall(ctx.TypeVoid(),
+                               coherent ? ctx.guest_page_store_coherent : ctx.guest_page_store,
+                               address_i, word);
+        }
+        return;
+    }
     const auto& spv_buffer = ctx.buffers[handle];
     if (const Id offset = spv_buffer.Offset(PointerSize::B32); Sirit::ValidId(offset)) {
         address = ctx.OpIAdd(ctx.U32[1], address, offset);
@@ -485,44 +590,88 @@ static void EmitStoreBufferB32xN(EmitContext& ctx, IR::Inst* inst, u32 handle, I
         const Id index_i = i == 0 ? address : ctx.OpIAdd(ctx.U32[1], address, ctx.ConstU32(i));
         const Id ptr_i = ctx.OpAccessChain(pointer_type, id, ctx.u32_zero_value, index_i);
         const Id value_i = N == 1 ? value : ctx.OpCompositeExtract(data_types[1], value, i);
-        ctx.OpStore(ptr_i, value_i);
+        ctx.WithSharedMemoryLock(
+            [&] {
+                ctx.OpStore(ptr_i, value_i);
+                return ctx.u32_zero_value;
+            },
+            spv_buffer.buffer_type == BufferType::SharedMemory);
     }
 }
 
-void EmitStoreBufferU8(EmitContext& ctx, IR::Inst*, u32 handle, Id address, Id value) {
+void EmitStoreBufferU8(EmitContext& ctx, IR::Inst*, u32 handle, Id address, Id value,
+                       const IR::Value& guest_address) {
+    if (!guest_address.IsEmpty()) {
+        const bool coherent = ctx.info.buffers.at(handle).GetSharp(ctx.info).mtype == 3;
+        const auto function = ctx.guest_page_store_subword[0][coherent];
+        if (!ctx.profile.guest_page_shift || !Sirit::ValidId(function)) {
+            throw std::runtime_error("Guest page store requires native subword lowering");
+        }
+        ctx.OpFunctionCall(ctx.TypeVoid(), function, ctx.Def(guest_address), value);
+        return;
+    }
     const auto& spv_buffer = ctx.buffers[handle];
     if (const Id offset = spv_buffer.Offset(PointerSize::B8); Sirit::ValidId(offset)) {
-        address = ctx.OpIAdd(ctx.U32[1], address, offset);
+        if (ctx.profile.needs_wide_buffer_byte_offsets) {
+            address = ctx.OpIAdd(ctx.U64, ctx.OpUConvert(ctx.U64, address),
+                                 ctx.OpUConvert(ctx.U64, offset));
+        } else {
+            address = ctx.OpIAdd(ctx.U32[1], address, offset);
+        }
     }
     const auto [id, pointer_type] = spv_buffer.Alias(PointerType::U8);
     const Id ptr{ctx.OpAccessChain(pointer_type, id, ctx.u32_zero_value, address)};
-    ctx.OpStore(ptr, value);
+    ctx.WithSharedMemoryLock(
+        [&] {
+            ctx.OpStore(ptr, value);
+            return ctx.u32_zero_value;
+        },
+        spv_buffer.buffer_type == BufferType::SharedMemory);
 }
 
-void EmitStoreBufferU16(EmitContext& ctx, IR::Inst*, u32 handle, Id address, Id value) {
+void EmitStoreBufferU16(EmitContext& ctx, IR::Inst*, u32 handle, Id address, Id value,
+                        const IR::Value& guest_address) {
+    if (!guest_address.IsEmpty()) {
+        const bool coherent = ctx.info.buffers.at(handle).GetSharp(ctx.info).mtype == 3;
+        const auto function = ctx.guest_page_store_subword[1][coherent];
+        if (!ctx.profile.guest_page_shift || !Sirit::ValidId(function)) {
+            throw std::runtime_error("Guest page store requires native subword lowering");
+        }
+        ctx.OpFunctionCall(ctx.TypeVoid(), function, ctx.Def(guest_address), value);
+        return;
+    }
     const auto& spv_buffer = ctx.buffers[handle];
     if (const Id offset = spv_buffer.Offset(PointerSize::B16); Sirit::ValidId(offset)) {
         address = ctx.OpIAdd(ctx.U32[1], address, offset);
     }
     const auto [id, pointer_type] = spv_buffer.Alias(PointerType::U16);
     const Id ptr{ctx.OpAccessChain(pointer_type, id, ctx.u32_zero_value, address)};
-    ctx.OpStore(ptr, value);
+    ctx.WithSharedMemoryLock(
+        [&] {
+            ctx.OpStore(ptr, value);
+            return ctx.u32_zero_value;
+        },
+        spv_buffer.buffer_type == BufferType::SharedMemory);
 }
 
-void EmitStoreBufferU32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value) {
-    EmitStoreBufferB32xN<1, PointerType::U32>(ctx, inst, handle, address, value);
+void EmitStoreBufferU32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value,
+                        const IR::Value& guest_address) {
+    EmitStoreBufferB32xN<1, PointerType::U32>(ctx, inst, handle, address, value, guest_address);
 }
 
-void EmitStoreBufferU32x2(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value) {
-    EmitStoreBufferB32xN<2, PointerType::U32>(ctx, inst, handle, address, value);
+void EmitStoreBufferU32x2(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value,
+                          const IR::Value& guest_address) {
+    EmitStoreBufferB32xN<2, PointerType::U32>(ctx, inst, handle, address, value, guest_address);
 }
 
-void EmitStoreBufferU32x3(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value) {
-    EmitStoreBufferB32xN<3, PointerType::U32>(ctx, inst, handle, address, value);
+void EmitStoreBufferU32x3(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value,
+                          const IR::Value& guest_address) {
+    EmitStoreBufferB32xN<3, PointerType::U32>(ctx, inst, handle, address, value, guest_address);
 }
 
-void EmitStoreBufferU32x4(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value) {
-    EmitStoreBufferB32xN<4, PointerType::U32>(ctx, inst, handle, address, value);
+void EmitStoreBufferU32x4(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value,
+                          const IR::Value& guest_address) {
+    EmitStoreBufferB32xN<4, PointerType::U32>(ctx, inst, handle, address, value, guest_address);
 }
 
 void EmitStoreBufferU64(EmitContext& ctx, IR::Inst*, u32 handle, Id address, Id value) {
@@ -532,26 +681,36 @@ void EmitStoreBufferU64(EmitContext& ctx, IR::Inst*, u32 handle, Id address, Id 
     }
     const auto [id, pointer_type] = spv_buffer.Alias(PointerType::U64);
     const Id ptr{ctx.OpAccessChain(pointer_type, id, ctx.u64_zero_value, address)};
-    ctx.OpStore(ptr, value);
+    ctx.WithSharedMemoryLock(
+        [&] {
+            ctx.OpStore(ptr, value);
+            return ctx.u32_zero_value;
+        },
+        spv_buffer.buffer_type == BufferType::SharedMemory);
 }
 
-void EmitStoreBufferF32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value) {
-    EmitStoreBufferB32xN<1, PointerType::F32>(ctx, inst, handle, address, value);
+void EmitStoreBufferF32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value,
+                        const IR::Value& guest_address) {
+    EmitStoreBufferB32xN<1, PointerType::F32>(ctx, inst, handle, address, value, guest_address);
 }
 
-void EmitStoreBufferF32x2(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value) {
-    EmitStoreBufferB32xN<2, PointerType::F32>(ctx, inst, handle, address, value);
+void EmitStoreBufferF32x2(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value,
+                          const IR::Value& guest_address) {
+    EmitStoreBufferB32xN<2, PointerType::F32>(ctx, inst, handle, address, value, guest_address);
 }
 
-void EmitStoreBufferF32x3(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value) {
-    EmitStoreBufferB32xN<3, PointerType::F32>(ctx, inst, handle, address, value);
+void EmitStoreBufferF32x3(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value,
+                          const IR::Value& guest_address) {
+    EmitStoreBufferB32xN<3, PointerType::F32>(ctx, inst, handle, address, value, guest_address);
 }
 
-void EmitStoreBufferF32x4(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value) {
-    EmitStoreBufferB32xN<4, PointerType::F32>(ctx, inst, handle, address, value);
+void EmitStoreBufferF32x4(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value,
+                          const IR::Value& guest_address) {
+    EmitStoreBufferB32xN<4, PointerType::F32>(ctx, inst, handle, address, value, guest_address);
 }
 
-void EmitStoreBufferFormatF32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value) {
+void EmitStoreBufferFormatF32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value,
+                              const IR::Value& guest_address) {
     UNREACHABLE_MSG("SPIR-V instruction");
 }
 

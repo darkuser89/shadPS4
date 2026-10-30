@@ -58,10 +58,12 @@ void SettingsWindow::LoadSettings(std::string profile) {
     fullscreenModeSetting =
         GetComboIndex(EmulatorSettings.GetFullScreenMode(), fullscreenModeOptions);
     presentModeSetting = GetComboIndex(EmulatorSettings.GetPresentMode(), presentModeOptions);
+    rendererSetting = GetComboIndex(EmulatorSettings.GetRenderer(), rendererOptions);
     windowHeightSetting = EmulatorSettings.GetWindowHeight();
     windowWidthSetting = EmulatorSettings.GetWindowWidth();
     hdrAllowedSetting = EmulatorSettings.IsHdrAllowed();
     fsrEnabledSetting = EmulatorSettings.IsFsrEnabled();
+    metalFxEnabledSetting = EmulatorSettings.IsMetalFxEnabled();
     rcasEnabledSetting = EmulatorSettings.IsRcasEnabled();
     rcasAttenuationSetting = static_cast<float>(EmulatorSettings.GetRcasAttenuation() * 0.001f);
 
@@ -114,10 +116,12 @@ void SettingsWindow::SaveSettings(std::string profile) {
     EmulatorSettings.SetFullScreen(isFullscreen);
     EmulatorSettings.SetFullScreenMode(fullscreenModeOptions.at(fullscreenModeSetting), isSpecific);
     EmulatorSettings.SetPresentMode(presentModeOptions.at(presentModeSetting), isSpecific);
+    EmulatorSettings.SetRenderer(rendererOptions.at(rendererSetting), isSpecific);
     EmulatorSettings.SetWindowHeight(windowHeightSetting, isSpecific);
     EmulatorSettings.SetWindowWidth(windowWidthSetting, isSpecific);
     EmulatorSettings.SetHdrAllowed(hdrAllowedSetting, isSpecific);
     EmulatorSettings.SetFsrEnabled(fsrEnabledSetting, isSpecific);
+    EmulatorSettings.SetMetalFxEnabled(metalFxEnabledSetting, isSpecific);
     EmulatorSettings.SetRcasEnabled(rcasEnabledSetting, isSpecific);
     EmulatorSettings.SetRcasAttenuation(static_cast<int>(rcasAttenuationSetting * 1000),
                                         isSpecific);
@@ -188,12 +192,11 @@ void SettingsWindow::GetProfileInfo() {
 
 SettingsWindow::SettingsWindow(bool gameRunning) : isGameRunning(gameRunning) {
     auto resource = cmrc::res::get_filesystem();
-    auto loadTexture = [&](const std::string& resourcePath,
-                           std::variant<SDL_Texture*, ImGui::RefCountedTexture>& texture) {
+    auto loadTexture = [&](const std::string& resourcePath, SettingsTexture& texture) {
         auto file = resource.open(resourcePath);
         std::vector<u8> texData = std::vector<u8>(file.begin(), file.end());
         gameRunning ? texture = ImGui::RefCountedTexture::DecodePngTexture(texData)
-                    : texture = BigPictureMode::LoadSdlTextureData(texData);
+                    : texture = BigPictureMode::LoadTextureData(std::move(texData));
     };
 
     loadTexture("src/resources/big_picture/settings.png", generalTexture);
@@ -345,8 +348,7 @@ void SettingsWindow::DrawCategoryTabs() {
     ImGui::EndChild();
 }
 
-void SettingsWindow::AddCategory(std::string name,
-                                 std::variant<SDL_Texture*, ImGui::RefCountedTexture> texture,
+void SettingsWindow::AddCategory(std::string name, SettingsTexture texture,
                                  SettingsCategory category) {
     ImGui::SameLine();
     ImGui::BeginGroup();
@@ -357,8 +359,8 @@ void SettingsWindow::AddCategory(std::string name,
         : ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.235f, 0.392f, 0.624f, 1.00f));
 
     ImTextureID id = nullptr;
-    if (std::holds_alternative<SDL_Texture*>(texture)) {
-        id = ImTextureID(std::get<SDL_Texture*>(texture));
+    if (std::holds_alternative<ImGui::Core::TextureManager::NativeTexture>(texture)) {
+        id = std::get<ImGui::Core::TextureManager::NativeTexture>(texture).id;
     } else if (std::holds_alternative<ImGui::RefCountedTexture>(texture)) {
         id = std::get<ImGui::RefCountedTexture>(texture).GetTexture().im_id;
     }
@@ -718,11 +720,20 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
             ImGui::TableSetupColumn("Value");
 
             AddSettingCombo("Display Mode", fullscreenModeSetting, fullscreenModeOptions);
+            AddSettingCombo("Renderer", rendererSetting, rendererOptions);
             AddSettingCombo("Present Mode", presentModeSetting, presentModeOptions);
             AddSettingSliderInt("Window Width", windowWidthSetting, 0, 8000);
             AddSettingSliderInt("Window Height", windowHeightSetting, 0, 7000);
             AddSettingCheckbox("Enable HDR", hdrAllowedSetting);
-            AddSettingCheckbox("Enable FSR", fsrEnabledSetting);
+            if (rendererOptions.at(rendererSetting) == "Metal4") {
+                const std::vector<std::string> upscalers = {"Off", "FSR", "MetalFX Spatial"};
+                int upscaler = metalFxEnabledSetting ? 2 : fsrEnabledSetting ? 1 : 0;
+                AddSettingCombo("Upscaling", upscaler, upscalers);
+                fsrEnabledSetting = upscaler == 1;
+                metalFxEnabledSetting = upscaler == 2;
+            } else {
+                AddSettingCheckbox("Enable FSR", fsrEnabledSetting);
+            }
 
             if (fsrEnabledSetting) {
                 AddSettingCheckbox("Enable RCAS", rcasEnabledSetting);

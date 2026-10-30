@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <limits>
+#include <stdexcept>
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/ir_emitter.h"
@@ -27,6 +28,18 @@ IR::Type BufferDataType(const IR::Inst& inst, const Profile& profile) {
         return IR::Type::U16;
     case IR::Opcode::LoadBufferU64:
     case IR::Opcode::StoreBufferU64:
+    case IR::Opcode::BufferAtomicISub64:
+    case IR::Opcode::BufferAtomicAnd64:
+    case IR::Opcode::BufferAtomicOr64:
+    case IR::Opcode::BufferAtomicXor64:
+    case IR::Opcode::BufferAtomicSwap64:
+    case IR::Opcode::BufferAtomicSrc2_64:
+    case IR::Opcode::BufferAtomicRSub64:
+    case IR::Opcode::BufferAtomicMaskOr64:
+    case IR::Opcode::BufferAtomicInc64:
+    case IR::Opcode::BufferAtomicDec64:
+    case IR::Opcode::BufferAtomicFCmpSwapRaw64:
+    case IR::Opcode::BufferAtomicCmpSwap64:
     case IR::Opcode::BufferAtomicIAdd64:
     case IR::Opcode::BufferAtomicSMax64:
     case IR::Opcode::BufferAtomicSMin64:
@@ -55,6 +68,18 @@ u32 BufferAddressShift(const IR::Inst& inst, AmdGpu::DataFormat data_format) {
         return 1;
     case IR::Opcode::LoadBufferU64:
     case IR::Opcode::StoreBufferU64:
+    case IR::Opcode::BufferAtomicISub64:
+    case IR::Opcode::BufferAtomicAnd64:
+    case IR::Opcode::BufferAtomicOr64:
+    case IR::Opcode::BufferAtomicXor64:
+    case IR::Opcode::BufferAtomicSwap64:
+    case IR::Opcode::BufferAtomicSrc2_64:
+    case IR::Opcode::BufferAtomicRSub64:
+    case IR::Opcode::BufferAtomicMaskOr64:
+    case IR::Opcode::BufferAtomicInc64:
+    case IR::Opcode::BufferAtomicDec64:
+    case IR::Opcode::BufferAtomicFCmpSwapRaw64:
+    case IR::Opcode::BufferAtomicCmpSwap64:
     case IR::Opcode::BufferAtomicIAdd64:
     case IR::Opcode::BufferAtomicSMax64:
     case IR::Opcode::BufferAtomicSMin64:
@@ -94,9 +119,10 @@ u32 BufferAddressShift(const IR::Inst& inst, AmdGpu::DataFormat data_format) {
 
 class Descriptors {
 public:
-    explicit Descriptors(Info& info_)
+    explicit Descriptors(Info& info_, const Profile& profile)
         : info{info_}, buffer_resources{info_.buffers}, image_resources{info_.images},
-          sampler_resources{info_.samplers}, fmask_resources(info_.fmasks) {}
+          sampler_resources{info_.samplers}, fmask_resources(info_.fmasks),
+          strict_image_views{profile.needs_typed_image_atomics} {}
 
     u32 Add(const BufferResource& desc) {
         const u32 index{Add(buffer_resources, desc, [&desc](const auto& existing) {
@@ -112,8 +138,11 @@ public:
     }
 
     u32 Add(const ImageResource& desc) {
-        const u32 index{Add(image_resources, desc, [&desc](const auto& existing) {
+        const u32 index{Add(image_resources, desc, [this, &desc](const auto& existing) {
             return desc.sharp_fetch == existing.sharp_fetch && desc.is_array == existing.is_array &&
+                   desc.is_atomic_view == existing.is_atomic_view &&
+                   (!strict_image_views ||
+                    (desc.is_depth == existing.is_depth && desc.is_r128 == existing.is_r128)) &&
                    desc.mip_fallback_mode == existing.mip_fallback_mode &&
                    desc.constant_mip_index == existing.constant_mip_index &&
                    desc.post_op == existing.post_op;
@@ -156,22 +185,37 @@ private:
     ImageResourceList& image_resources;
     SamplerResourceList& sampler_resources;
     FMaskResourceList& fmask_resources;
+    bool strict_image_views{};
 };
 
 } // Anonymous namespace
 
 using SharpSources = boost::container::small_vector<const IR::Inst*, 4>;
 
-SharpLocation SharpLocationFromSource(const IR::Inst* inst) {
+SharpLocation SharpLocationFromSource(const IR::Inst* inst, const Info& info) {
     SharpLocation location{};
     if (inst->GetOpcode() == IR::Opcode::GetUserData) {
         return static_cast<SharpLocation>(inst->Arg(0).ScalarReg());
+    } else if (info.prepare_memory_read && !info.flatbuf_sharp_locations.empty()) {
+        const auto location = info.flatbuf_sharp_locations.find(inst);
+        if (location == info.flatbuf_sharp_locations.end()) {
+            throw std::runtime_error("Metal descriptor source has no flattened location");
+        }
+        return location->second;
     } else if (inst->GetOpcode() == IR::Opcode::ReadConstBuffer) {
         location = inst->Flags<IR::BufferInstInfo>().flatbuf_off_dw;
     } else {
-        location = inst->Flags<SharpLocation>();
+        const u32 offset =
+            info.prepare_memory_read ? inst->Flags<u32>() : inst->Flags<SharpLocation>();
+        if (info.prepare_memory_read && offset >= UNKNOWN_LOCATION) {
+            throw std::runtime_error("Metal descriptor source exceeds the descriptor index range");
+        }
+        location = static_cast<SharpLocation>(offset);
     }
     if (location == 0) {
+        if (info.prepare_memory_read) {
+            throw std::runtime_error("Metal descriptor source was not flattened");
+        }
         LOG_WARNING(Render_Recompiler, "Sharp source was not flatenned");
         return UNKNOWN_LOCATION;
     }
@@ -179,7 +223,7 @@ SharpLocation SharpLocationFromSource(const IR::Inst* inst) {
 }
 
 template <typename T>
-SharpFetch<T> ConstructSharpFetch(const SharpReference& sharp) {
+SharpFetch<T> ConstructSharpFetch(const SharpReference& sharp, const Info& info) {
     using Summary = SharpFetch<T>::Summary;
     SharpFetch<T> sharp_fetch{};
     for (u32 i = 0; i < sharp.num_dwords; i++) {
@@ -187,7 +231,7 @@ SharpFetch<T> ConstructSharpFetch(const SharpReference& sharp) {
         if (dword.IsImmediate()) {
             sharp_fetch.immediates[i] = dword.U32();
         } else {
-            sharp_fetch.offsets[i] = SharpLocationFromSource(dword.Inst());
+            sharp_fetch.offsets[i] = SharpLocationFromSource(dword.Inst(), info);
             sharp_fetch.load_mask |= (1 << i);
             if (sharp_fetch.offsets[i] == UNKNOWN_LOCATION) {
                 sharp_fetch.summary = Summary::Invalid;
@@ -211,7 +255,7 @@ void PatchBufferSharp(const ResourceDiscovery& resource, Info& info, Descriptors
     IR::Inst& inst = *resource.user;
 
     const u32 buffer_binding = descriptors.Add(BufferResource{
-        .sharp_fetch = ConstructSharpFetch<AmdGpu::Buffer>(resource.sharps[0]),
+        .sharp_fetch = ConstructSharpFetch<AmdGpu::Buffer>(resource.sharps[0], info),
         .used_types = BufferDataType(inst, profile),
         .buffer_type = BufferType::Guest,
         .is_written = IsBufferStore(inst),
@@ -239,7 +283,7 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
     const bool needs_mip_storage_fallback =
         inst_info.has_lod && is_written && !profile.supports_image_load_store_lod;
     ImageResource image_res = {
-        .sharp_fetch = ConstructSharpFetch<AmdGpu::Image>(resource.sharps[0]),
+        .sharp_fetch = ConstructSharpFetch<AmdGpu::Image>(resource.sharps[0], info),
         .is_depth = bool(inst_info.is_depth),
         .is_atomic = is_atomic,
         .is_array = bool(inst_info.is_array),
@@ -250,6 +294,19 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
 
     auto image = image_res.GetSharp(info);
     ASSERT(image.GetType() != AmdGpu::ImageType::Invalid);
+    if (profile.needs_typed_image_atomics && is_atomic &&
+        (AmdGpu::IsFmask(image.GetDataFmt()) ||
+         AmdGpu::NumBitsPerBlock(image.GetDataFmt()) != 32)) {
+        throw std::runtime_error(
+            "Metal image atomic surface width does not match the 32-bit instruction");
+    }
+    if (profile.needs_typed_image_atomics && is_atomic && !AmdGpu::IsFmask(image.GetDataFmt()) &&
+        AmdGpu::NumBitsPerBlock(image.GetDataFmt()) == 32 &&
+        (image.GetDataFmt() != AmdGpu::DataFormat::Format32 ||
+         !AmdGpu::IsInteger(image.GetNumberFmt()))) {
+        image_res.is_atomic_view = true;
+        image = image_res.GetSharp(info);
+    }
 
     if (needs_mip_storage_fallback) {
         // If the mip level to IMAGE_(LOAD/STORE)_MIP is a constant, set up ImageResource
@@ -285,7 +342,7 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
     }
 
     // Patch image instruction if image is FMask.
-    if (AmdGpu::IsFmask(image.GetDataFmt())) {
+    if (AmdGpu::IsFmask(image.GetDataFmt()) && !profile.needs_fmask_lowering) {
         ASSERT_MSG(!is_written, "FMask storage instructions are not supported");
 
         IR::IREmitter ir{*inst.GetParent(), IR::Block::InstructionList::s_iterator_to(inst)};
@@ -308,7 +365,7 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
 
             // Track FMask resource to do specialization.
             descriptors.Add(FMaskResource{
-                .sharp_idx = SharpLocationFromSource(resource.sharps[0].dwords[0].Inst()),
+                .sharp_idx = SharpLocationFromSource(resource.sharps[0].dwords[0].Inst(), info),
             });
             return;
         }
@@ -321,16 +378,20 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
 
     IR::IREmitter ir{*inst.GetParent(), IR::Block::InstructionList::s_iterator_to(inst)};
 
-    if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw) {
+    if (resource.sharps[1].num_dwords) {
         auto& lod_prod = resource.sharps[1].post_op_data.lod_prod;
         const u32 sampler_binding = descriptors.Add(SamplerResource{
-            .sharp_fetch = ConstructSharpFetch<AmdGpu::Sampler>(resource.sharps[1]),
+            .sharp_fetch = ConstructSharpFetch<AmdGpu::Sampler>(resource.sharps[1], info),
             .post_op = resource.sharps[1].post_op,
-            .post_op_tsharp_dw3_off =
-                lod_prod.IsEmpty() ? UNKNOWN_LOCATION : SharpLocationFromSource(lod_prod.Inst()),
+            .post_op_tsharp_dw3_off = lod_prod.IsEmpty()
+                                          ? UNKNOWN_LOCATION
+                                          : SharpLocationFromSource(lod_prod.Inst(), info),
             .is_depth = bool(inst_info.is_depth), // true for the _C (compare) opcodes
         });
         inst.SetArg(0, ir.Imm32(image_binding | sampler_binding << 16));
+        if (inst.GetOpcode() == IR::Opcode::ImageQueryLod) {
+            inst.SetArg(2, IR::Value{});
+        }
     } else {
         inst.SetArg(0, ir.Imm32(image_binding));
     }
@@ -492,10 +553,10 @@ void PatchGlobalDataShareAccess(IR::Inst& inst, Info& info, Descriptors& descrip
         break;
     }
     case IR::Opcode::SharedAtomicInc32:
-        inst.ReplaceUsesWith(ir.BufferAtomicInc(handle, address_dwords, {}));
+        inst.ReplaceUsesWith(ir.BufferAtomicInc(handle, address_dwords, IR::U32{inst.Arg(1)}, {}));
         break;
     case IR::Opcode::SharedAtomicDec32:
-        inst.ReplaceUsesWith(ir.BufferAtomicDec(handle, address_dwords, {}));
+        inst.ReplaceUsesWith(ir.BufferAtomicDec(handle, address_dwords, IR::U32{inst.Arg(1)}, {}));
         break;
     case IR::Opcode::SharedAtomicAnd32:
         inst.ReplaceUsesWith(ir.BufferAtomicAnd(handle, address_dwords, inst.Arg(1), {}));
@@ -506,6 +567,26 @@ void PatchGlobalDataShareAccess(IR::Inst& inst, Info& info, Descriptors& descrip
     case IR::Opcode::SharedAtomicXor32:
         inst.ReplaceUsesWith(ir.BufferAtomicXor(handle, address_dwords, inst.Arg(1), {}));
         break;
+    case IR::Opcode::SharedAtomicRSub32:
+        inst.ReplaceUsesWith(ir.BufferAtomicRSub(handle, address_dwords, IR::U32{inst.Arg(1)}, {}));
+        break;
+    case IR::Opcode::SharedAtomicMaskOr32:
+        inst.ReplaceUsesWith(ir.BufferAtomicMaskOr(handle, address_dwords, IR::U32{inst.Arg(1)},
+                                                   IR::U32{inst.Arg(2)}, {}));
+        break;
+    case IR::Opcode::SharedAtomicWrap32:
+        inst.ReplaceUsesWith(ir.BufferAtomicWrap(handle, address_dwords, IR::U32{inst.Arg(1)},
+                                                 IR::U32{inst.Arg(2)}, {}));
+        break;
+    case IR::Opcode::SharedAtomicExchange32:
+        inst.ReplaceUsesWith(ir.BufferAtomicSwap(handle, address_dwords, inst.Arg(1), {}));
+        break;
+    case IR::Opcode::SharedAtomicFCmpSwap32:
+        inst.ReplaceUsesWith(
+            ir.BufferAtomicFCmpSwapRaw(handle, address_dwords, inst.Arg(1), inst.Arg(2), {}));
+        break;
+    case IR::Opcode::SharedAtomicFCmpSwap64:
+        UNREACHABLE_MSG("64-bit GDS floating-point compare-swap is not supported");
     case IR::Opcode::SharedAtomicCmpSwap32:
         // Args are (address, value, cmp_value)
         inst.ReplaceUsesWith(
@@ -637,7 +718,9 @@ void PatchBufferArgs(IR::Inst& inst, Info& info) {
 }
 
 void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image_res,
-                          const AmdGpu::Image& image) {
+                          const AmdGpu::Image& image, ImageSampleConverter convert_image_sample,
+                          bool normalized_depth, bool depth_compare_gradients, bool image_gradients,
+                          bool image_sample_clamp, bool image_gather_lod) {
     const auto handle = inst.Arg(0);
     const auto& sampler_res = info.samplers[(handle.U32() >> 16) & 0xFFFF];
     const auto sampler = sampler_res.GetSharp(info);
@@ -741,12 +824,22 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
     const bool is_msaa = view_type == AmdGpu::ImageType::Color2DMsaa ||
                          view_type == AmdGpu::ImageType::Color2DMsaaArray;
     const bool unnormalized = sampler.force_unnormalized || inst_info.is_unnormalized;
+    const bool depth_gradient =
+        depth_compare_gradients && inst_info.is_depth && inst_info.has_derivatives;
+    const bool native_gradient = (image_gradients && inst_info.has_derivatives) || depth_gradient;
     const bool needs_dimentions = (!is_msaa && unnormalized) || (is_msaa && !unnormalized);
     const auto dimensions =
         needs_dimentions ? ir.ImageQueryDimension(handle, ir.Imm32(0u), ir.Imm1(false), inst_info)
                          : IR::Value{};
     const auto get_coord = [&](u32 coord_idx, u32 dim_idx) -> IR::Value {
         const auto coord = get_addr_reg(coord_idx);
+        if ((native_gradient || image_sample_clamp) &&
+            ((view_type == AmdGpu::ImageType::Color1DArray && dim_idx == 1) ||
+             ((view_type == AmdGpu::ImageType::Color2DArray ||
+               view_type == AmdGpu::ImageType::Cube) &&
+              dim_idx == 2))) {
+            return coord;
+        }
         if (is_msaa) {
             // For MSAA images preserve the unnormalized coord or manually unnormalize it
             if (unnormalized) {
@@ -795,40 +888,90 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
                                                  : IR::F32{};
     const IR::F32 lod_clamp = inst_info.has_lod_clamp ? get_addr_reg(addr_reg++) : IR::F32{};
 
+    const auto normalize_gradient = [&](const IR::Value& gradient) -> IR::Value {
+        if (!native_gradient || !unnormalized) {
+            return gradient;
+        }
+        const u32 count =
+            view_type == AmdGpu::ImageType::Color1D || view_type == AmdGpu::ImageType::Color1DArray
+                ? 1
+            : view_type == AmdGpu::ImageType::Color3D ? 3
+                                                      : 2;
+        std::array<IR::Value, 3> normalized;
+        for (u32 component = 0; component < count; ++component) {
+            const auto value =
+                count == 1 ? IR::F32{gradient} : IR::F32{ir.CompositeExtract(gradient, component)};
+            const auto dimension =
+                ir.ConvertUToF(32, 32, IR::U32{ir.CompositeExtract(dimensions, component)});
+            normalized[component] = ir.FPDiv(value, dimension);
+        }
+        if (count == 1) {
+            return normalized[0];
+        }
+        return count == 2 ? ir.CompositeConstruct(normalized[0], normalized[1])
+                          : ir.CompositeConstruct(normalized[0], normalized[1], normalized[2]);
+    };
+
     auto texel = [&] -> IR::Value {
         if (is_msaa) {
             return ir.ImageRead(handle, coords, {}, ir.Imm32(0U), inst_info);
         }
         if (inst_info.is_gather) {
+            const auto lod_info =
+                image_gather_lod
+                    ? ir.CompositeConstruct(lod.IsEmpty() ? ir.Imm32(0.f) : lod,
+                                            bias.IsEmpty() ? ir.Imm32(0.f) : bias,
+                                            lod_clamp.IsEmpty() ? ir.Imm32(0.f) : lod_clamp)
+                    : IR::Value{};
             if (inst_info.is_depth) {
-                return ir.ImageGatherDref(handle, coords, offset, dref, inst_info);
+                return ir.ImageGatherDref(handle, coords, offset, dref, inst_info, lod_info);
             }
-            return ir.ImageGather(handle, coords, offset, inst_info);
+            return ir.ImageGather(handle, coords, offset, inst_info, lod_info);
         }
         if (inst_info.has_derivatives) {
-            return ir.ImageGradient(handle, coords, derivatives_dx, derivatives_dy, offset,
-                                    lod_clamp, inst_info);
+            if (depth_gradient) {
+                return ir.ImageSampleDrefGradient(
+                    handle, coords, normalize_gradient(derivatives_dx),
+                    normalize_gradient(derivatives_dy), offset, dref, lod_clamp, inst_info);
+            }
+            return ir.ImageGradient(handle, coords, normalize_gradient(derivatives_dx),
+                                    normalize_gradient(derivatives_dy), offset, lod_clamp,
+                                    inst_info);
         }
         if (inst_info.is_depth) {
             if (explicit_lod) {
                 return ir.ImageSampleDrefExplicitLod(handle, coords, dref, lod, offset, inst_info);
             }
-            return ir.ImageSampleDrefImplicitLod(handle, coords, dref, bias, offset, inst_info);
+            return ir.ImageSampleDrefImplicitLod(handle, coords, dref, bias, offset, inst_info,
+                                                 image_sample_clamp ? lod_clamp : IR::F32{});
         }
         if (explicit_lod) {
             return ir.ImageSampleExplicitLod(handle, coords, lod, offset, inst_info);
         }
-        return ir.ImageSampleImplicitLod(handle, coords, bias, offset, inst_info);
+        return ir.ImageSampleImplicitLod(handle, coords, bias, offset, inst_info,
+                                         image_sample_clamp ? lod_clamp : IR::F32{});
     }();
 
-    auto converted = ApplyReadNumberConversionVec4(ir, texel, image.GetNumberConversion());
-    if (sampler.force_degamma && image.GetNumberFmt() != AmdGpu::NumberFormat::Srgb) {
+    const bool force_degamma =
+        sampler.force_degamma && image.GetNumberFmt() != AmdGpu::NumberFormat::Srgb;
+    const bool is_depth_result =
+        inst_info.is_depth && (!inst_info.has_derivatives || depth_gradient) && !is_msaa;
+    if (convert_image_sample && !image_res.is_written &&
+        (is_depth_result || (!inst_info.is_depth && !force_degamma))) {
+        inst.ReplaceUsesWith(convert_image_sample(ir, texel, image, inst_info));
+        return;
+    }
+    auto converted = normalized_depth
+                         ? texel
+                         : ApplyReadNumberConversionVec4(ir, texel, image.GetNumberConversion());
+    if (force_degamma) {
         converted = ApplyForceDegamma(ir, texel);
     }
     inst.ReplaceUsesWith(converted);
 }
 
-void PatchImageArgs(IR::Inst& inst, Info& info) {
+void PatchImageArgs(IR::Inst& inst, Info& info, ImageReadConverter convert_image_read,
+                    ImageSampleConverter convert_image_sample, const Profile& profile) {
     // Nothing to patch for dimension query.
     if (inst.GetOpcode() == IR::Opcode::ImageQueryDimensions) {
         return;
@@ -838,10 +981,15 @@ void PatchImageArgs(IR::Inst& inst, Info& info) {
     const auto binding_index = image_handle.U32() & 0xFFFF;
     const auto& image_res = info.images[binding_index];
     auto image = image_res.GetSharp(info);
+    const bool normalized_depth =
+        profile.needs_unorm32_depth_conversion && image_res.RequiresUnorm32DepthConversion(image);
 
     // Sample instructions must be handled separately using address register data.
     if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw) {
-        return PatchImageSampleArgs(inst, info, image_res, image);
+        return PatchImageSampleArgs(inst, info, image_res, image, convert_image_sample,
+                                    normalized_depth, profile.needs_depth_compare_gradients,
+                                    profile.needs_image_gradients, profile.needs_image_sample_clamp,
+                                    profile.needs_image_gather_lod);
     }
 
     IR::IREmitter ir{*inst.GetParent(), IR::Block::InstructionList::s_iterator_to(inst)};
@@ -900,12 +1048,18 @@ void PatchImageArgs(IR::Inst& inst, Info& info) {
     const auto is_storage = image_res.is_written;
     if (inst.GetOpcode() == IR::Opcode::ImageRead) {
         auto texel = ir.ImageRead(image_handle, coords, lod, ms, inst_info);
+        if (convert_image_read && (is_storage || !image_res.is_depth)) {
+            inst.ReplaceUsesWith(convert_image_read(ir, texel, image, is_storage));
+            return;
+        }
         if (is_storage) {
             // Storage image requires shader swizzle.
             texel = ApplySwizzle(ir, texel, image.DstSelect());
         }
         const auto converted =
-            ApplyReadNumberConversionVec4(ir, texel, image.GetNumberConversion());
+            normalized_depth
+                ? texel
+                : ApplyReadNumberConversionVec4(ir, texel, image.GetNumberConversion());
         inst.ReplaceUsesWith(converted);
     } else {
         inst.SetArg(1, coords);
@@ -925,11 +1079,17 @@ void PatchImageArgs(IR::Inst& inst, Info& info) {
     }
 }
 
+u32 GetBufferAddressShift(const IR::Inst& inst, AmdGpu::DataFormat data_format) {
+    return BufferAddressShift(inst, data_format);
+}
+
 void ResourcePatchingPass(Shader::Info& info, const ResourceDiscoveryList& resources,
-                          const Profile& profile) {
+                          const Profile& profile, bool (*patch_buffer)(IR::Inst&, Info&),
+                          ImageReadConverter convert_image_read,
+                          ImageSampleConverter convert_image_sample) {
     // Iterate over discovered resources and patch them after finding the sharp.
     // Pass 1: Track resource sharps
-    Descriptors descriptors{info};
+    Descriptors descriptors{info, profile};
     for (const auto& usage : resources) {
         IR::Inst& inst = *usage.user;
         if (IsBufferInstruction(inst)) {
@@ -943,12 +1103,17 @@ void ResourcePatchingPass(Shader::Info& info, const ResourceDiscoveryList& resou
     for (const auto& usage : resources) {
         IR::Inst& inst = *usage.user;
         if (IsBufferInstruction(inst)) {
-            PatchBufferArgs(inst, info);
+            if (!patch_buffer || !patch_buffer(inst, info)) {
+                PatchBufferArgs(inst, info);
+            }
         } else if (IsImageInstruction(inst)) {
-            PatchImageArgs(inst, info);
+            PatchImageArgs(inst, info, convert_image_read, convert_image_sample, profile);
         } else if (IsDataRingInstruction(inst)) {
             PatchGlobalDataShareAccess(inst, info, descriptors, profile);
         }
+    }
+    if (!info.flatbuf_sharp_locations.empty()) {
+        std::unordered_map<const IR::Inst*, SharpLocation>{}.swap(info.flatbuf_sharp_locations);
     }
 }
 

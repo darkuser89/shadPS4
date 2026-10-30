@@ -12,7 +12,6 @@
 #include "libraries/kernel/time.h"
 #include "libraries/system/msgdialog.h"
 #include "video_core/amdgpu/pm4_cmds.h"
-#include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 
 using namespace DebugStateType;
 
@@ -174,8 +173,7 @@ void DebugStateImpl::PushRegsDump(uintptr_t base_addr, uintptr_t header_addr,
             if (stage->address) {
                 const auto params = AmdGpu::GetParams(*stage);
                 (*dump)->stages[i] = PipelineShaderProgramDump{
-                    .name = Vulkan::PipelineCache::GetShaderName(Shader::StageFromIndex(i),
-                                                                 params.hash),
+                    .name = fmt::format("{}_{:#018x}", Shader::StageFromIndex(i), params.hash),
                     .hash = params.hash,
                     .user_data = *stage,
                     .code = std::vector<u32>{params.code.begin(), params.code.end()},
@@ -200,7 +198,7 @@ void DebugStateImpl::PushRegsDumpCompute(uintptr_t base_addr, uintptr_t header_a
 
     const auto params = AmdGpu::GetParams(cs);
     (*dump)->cs_data = PipelineComputerProgramDump{
-        .name = Vulkan::PipelineCache::GetShaderName(Shader::HwStage::Compute, params.hash),
+        .name = fmt::format("{}_{:#018x}", Shader::HwStage::Compute, params.hash),
         .hash = params.hash,
         .cs_program = cs,
         .code = std::vector<u32>{params.code.begin(), params.code.end()},

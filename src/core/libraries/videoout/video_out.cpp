@@ -11,13 +11,19 @@
 #include "core/libraries/videoout/video_out.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "core/platform.h"
-#include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/presenter.h"
 
-extern std::unique_ptr<Vulkan::Presenter> presenter;
+extern std::unique_ptr<VideoCore::Presenter> presenter;
 
 namespace Libraries::VideoOut {
 
 static std::unique_ptr<VideoOutDriver> driver;
+
+void Shutdown() {
+    if (driver) {
+        driver->Stop();
+    }
+}
 
 void PS4_SYSV_ABI sceVideoOutSetBufferAttribute(BufferAttribute* attribute, PixelFormat pixelFormat,
                                                 u32 tilingMode, u32 aspectRatio, u32 width,
@@ -401,7 +407,7 @@ s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettin
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
-    presenter->GetPPSettingsRef().gamma = settings->gamma;
+    presenter->SetGamma(settings->gamma);
     return ORBIS_OK;
 }
 

@@ -122,12 +122,23 @@ public:
                 }
             }
         }
+        for (auto& module : m_modules) {
+            if (module.get() == m || std::ranges::any_of(exports, [&](const auto& export_mod) {
+                    return std::ranges::contains(module->GetImportModules(), export_mod.name,
+                                                 &ModuleInfo::name);
+                })) {
+                module->FinalizeMemoryProtection();
+            }
+        }
     }
 
     void RelocateAllImports() {
         std::scoped_lock lk{mutex};
         for (auto& module : m_modules) {
             Relocate(module.get());
+        }
+        for (auto& module : m_modules) {
+            module->FinalizeMemoryProtection();
         }
     }
 

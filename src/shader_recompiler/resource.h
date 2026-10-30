@@ -81,6 +81,12 @@ enum class BufferType : u8 {
     GdsBuffer,
     SharedMemory,
     ClipPlanes,
+    DispatchBase,
+    BufferBounds,
+    GeometryInputs,
+    GeometryEmissions,
+    GeometryPayload,
+    GuestPageTable,
 };
 
 struct BufferResource {
@@ -127,9 +133,15 @@ struct ImageResource {
     bool is_array{};
     bool is_written{};
     bool is_r128{};
+    bool is_atomic_view{};
     u8 constant_mip_index{};
     MipStorageFallbackMode mip_fallback_mode{};
     SharpFetchPostOp post_op{};
+
+    constexpr bool RequiresUnorm32DepthConversion(const AmdGpu::Image& image) const noexcept {
+        return is_depth && !is_written && image.GetDataFmt() == AmdGpu::DataFormat::Format32 &&
+               image.GetNumberConversion() == AmdGpu::NumberConversion::Uint32ToUnorm;
+    }
 
     constexpr AmdGpu::Image GetSharp(const auto& info) const noexcept {
         AmdGpu::Image image{};
@@ -148,6 +160,10 @@ struct ImageResource {
                 data_fmt != AmdGpu::DataFormat::Format32) {
                 image = AmdGpu::Image::Null(true);
             }
+        }
+        if (is_atomic_view) {
+            image.data_format = u64(AmdGpu::DataFormat::Format32);
+            image.num_format = u64(AmdGpu::NumberFormat::Uint);
         }
         return image;
     }

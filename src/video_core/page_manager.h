@@ -9,8 +9,16 @@
 #include "common/types.h"
 #include "video_core/buffer_cache/region_definitions.h"
 
+namespace VideoCore {
+class Rasterizer;
+}
+
 namespace Vulkan {
 class Rasterizer;
+}
+
+namespace Core {
+enum class MemoryPermission : u32;
 }
 
 namespace VideoCore {
@@ -29,6 +37,7 @@ class PageManager {
     static constexpr size_t PM_PAGE_SIZE = 1ULL << PM_PAGE_BITS;
 
 public:
+    explicit PageManager(VideoCore::Rasterizer* rasterizer, bool guest_protection = false);
     explicit PageManager(Vulkan::Rasterizer* rasterizer);
     ~PageManager();
 
@@ -37,6 +46,8 @@ public:
 
     /// Unregister a range of gpu memory that was unmapped.
     void OnGpuUnmap(VAddr address, size_t size);
+    bool ProtectGuestMemory(VAddr address, u64 size, u32 prot);
+    bool IsGuestAccessAllowed(VAddr address, u64 size, Core::MemoryPermission access) const;
 
     /// Updates watches in the pages touching the specified region.
     void UpdatePageWatchers(VAddr addr, u64 size, PageOp write_op) const;
@@ -60,6 +71,8 @@ private:
     friend struct UffdImpl;
     friend struct SignalImpl;
     struct Impl;
+    explicit PageManager(std::unique_ptr<Rasterizer> rasterizer);
+    std::unique_ptr<Rasterizer> rasterizer_adapter;
     std::unique_ptr<Impl> impl;
 };
 

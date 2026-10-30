@@ -30,6 +30,20 @@ static u64 GetAlignedSize(const elf_program_header& phdr) {
                               : phdr.p_memsz);
 }
 
+static MemoryProt GetSegmentProtection(const elf_program_header& phdr) {
+    auto prot = MemoryProt::NoAccess;
+    if ((phdr.p_flags & PF_READ) != 0) {
+        prot |= MemoryProt::CpuRead;
+    }
+    if ((phdr.p_flags & PF_WRITE) != 0) {
+        prot |= MemoryProt::CpuWrite;
+    }
+    if ((phdr.p_flags & PF_EXEC) != 0) {
+        prot |= MemoryProt::CpuExec;
+    }
+    return prot;
+}
+
 static u64 CalculateBaseSize(const elf_header& ehdr, std::span<const elf_program_header> phdr) {
     u64 base_size = 0;
     for (u16 i = 0; i < ehdr.e_phnum; i++) {
@@ -99,13 +113,27 @@ Module::Module(Core::MemoryManager* memory_, const std::filesystem::path& file_,
 
 Module::~Module() = default;
 
+void Module::WriteRelocation(VAddr address, u64 value) {
+#ifdef __APPLE__
+    if (!memory_protection_pending && EmulatorSettings.GetRenderer() == "Metal4") {
+        memory->WriteModuleMemory(address, {reinterpret_cast<const u8*>(&value), sizeof(value)});
+        return;
+    }
+#endif
+    std::memcpy(reinterpret_cast<void*>(address), &value, sizeof(value));
+}
+
 s32 Module::Start(u64 args, const void* argp, void* param) {
+    FinalizeMemoryProtection();
     LOG_INFO(Core_Linker, "Module started : {}", name);
     const VAddr addr = dynamic_info.init_virtual_addr + GetBaseAddress();
     return reinterpret_cast<EntryFunc>(addr)(args, argp, param);
 }
 
 void Module::LoadModuleToMemory(u32& max_tls_index) {
+#ifdef __APPLE__
+    memory_protection_pending = EmulatorSettings.GetRenderer() == "Metal4";
+#endif
     static constexpr size_t BlockAlign = 0x1000;
     static constexpr u64 TrampolineSize = 8_MB;
 
@@ -149,21 +177,13 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
         void* segment_addr = std::bit_cast<void*>(segment_vaddr);
         const u64 segment_size = GetAlignedSize(phdr);
         if (do_map) {
-            // Convert ELF flags to memory prot.
-            auto segment_prot = MemoryProt::NoAccess;
-            if ((phdr.p_flags & PF_READ) != 0) {
-                segment_prot |= MemoryProt::CpuRead;
-            }
-            if ((phdr.p_flags & PF_WRITE) != 0) {
-                segment_prot |= MemoryProt::CpuWrite;
-            }
-            if ((phdr.p_flags & PF_EXEC) != 0) {
-                segment_prot |= MemoryProt::CpuExec;
-            }
+            const auto segment_prot = GetSegmentProtection(phdr);
 
             // Map module segments
             const auto memory_type = IsSystemLib() ? VMAType::Code : VMAType::Flexible;
-            s32 result = memory->MapMemory(&segment_addr, segment_vaddr, segment_size, segment_prot,
+            const auto mapping_prot =
+                memory_protection_pending ? MemoryProt::CpuReadWrite : segment_prot;
+            s32 result = memory->MapMemory(&segment_addr, segment_vaddr, segment_size, mapping_prot,
                                            MemoryMapFlags::Fixed, memory_type, name);
             ASSERT_MSG(result == ORBIS_OK, "Failed to map segment at {:#x} for module {}",
                        segment_vaddr, name);
@@ -359,6 +379,23 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
         }
     }
 #endif
+}
+
+void Module::FinalizeMemoryProtection() {
+    if (!memory_protection_pending) {
+        return;
+    }
+    for (const auto& phdr : elf.GetProgramHeader()) {
+        if (phdr.p_memsz == 0 || (phdr.p_type != PT_LOAD && phdr.p_type != PT_SCE_RELRO)) {
+            continue;
+        }
+        const auto prot = GetSegmentProtection(phdr);
+        const s32 result =
+            memory->Protect(base_virtual_addr + phdr.p_vaddr, GetAlignedSize(phdr), prot);
+        ASSERT_MSG(result == ORBIS_OK, "Failed to protect segment at {:#x} for module {}",
+                   base_virtual_addr + phdr.p_vaddr, name);
+    }
+    memory_protection_pending = false;
 }
 
 void Module::LoadDynamicInfo() {

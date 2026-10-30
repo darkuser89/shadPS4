@@ -1,11 +1,49 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <stdexcept>
 #include "shader_recompiler/frontend/translate/translate.h"
+#include "shader_recompiler/profile.h"
 
 namespace Shader::Gcn {
 
 void Translator::EmitVectorMemory(const GcnInst& inst) {
+    if (profile.needs_extended_buffer_atomics) {
+        switch (inst.opcode) {
+        case Opcode::BUFFER_ATOMIC_SUB:
+            return BUFFER_ATOMIC(AtomicOp::Sub, inst);
+        case Opcode::BUFFER_ATOMIC_SWAP_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::Swap, inst);
+        case Opcode::BUFFER_ATOMIC_CMPSWAP_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::CmpSwap, inst);
+        case Opcode::BUFFER_ATOMIC_ADD_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::Add, inst);
+        case Opcode::BUFFER_ATOMIC_SUB_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::Sub, inst);
+        case Opcode::BUFFER_ATOMIC_SMIN_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::Smin, inst);
+        case Opcode::BUFFER_ATOMIC_UMIN_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::Umin, inst);
+        case Opcode::BUFFER_ATOMIC_SMAX_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::Smax, inst);
+        case Opcode::BUFFER_ATOMIC_UMAX_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::Umax, inst);
+        case Opcode::BUFFER_ATOMIC_AND_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::And, inst);
+        case Opcode::BUFFER_ATOMIC_OR_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::Or, inst);
+        case Opcode::BUFFER_ATOMIC_XOR_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::Xor, inst);
+        case Opcode::BUFFER_ATOMIC_INC_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::Inc, inst);
+        case Opcode::BUFFER_ATOMIC_DEC_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::Dec, inst);
+        case Opcode::BUFFER_ATOMIC_FCMPSWAP_X2:
+            return BUFFER_ATOMIC<IR::U64>(AtomicOp::FCmpSwap, inst);
+        default:
+            break;
+        }
+    }
     switch (inst.opcode) {
         // MUBUF / MTBUF
 
@@ -141,8 +179,18 @@ void Translator::EmitVectorMemory(const GcnInst& inst) {
         return IMAGE_ATOMIC(AtomicOp::Swap, inst);
     case Opcode::IMAGE_ATOMIC_CMPSWAP:
         return IMAGE_ATOMIC(AtomicOp::CmpSwap, inst);
+    case Opcode::IMAGE_ATOMIC_FCMPSWAP:
+        if (!profile.needs_software_float_atomics) {
+            return LogMissingOpcode(inst);
+        }
+        return IMAGE_ATOMIC(AtomicOp::FCmpSwap, inst);
     case Opcode::IMAGE_ATOMIC_ADD:
         return IMAGE_ATOMIC(AtomicOp::Add, inst);
+    case Opcode::IMAGE_ATOMIC_SUB:
+        if (!profile.needs_typed_image_atomics) {
+            return LogMissingOpcode(inst);
+        }
+        return IMAGE_ATOMIC(AtomicOp::Sub, inst);
     case Opcode::IMAGE_ATOMIC_SMIN:
         return IMAGE_ATOMIC(AtomicOp::Smin, inst);
     case Opcode::IMAGE_ATOMIC_UMIN:
@@ -166,6 +214,54 @@ void Translator::EmitVectorMemory(const GcnInst& inst) {
     case Opcode::IMAGE_ATOMIC_DEC:
         return IMAGE_ATOMIC(AtomicOp::Dec, inst);
 
+    case Opcode::IMAGE_SAMPLE_CL:
+    case Opcode::IMAGE_SAMPLE_CL_O:
+    case Opcode::IMAGE_SAMPLE_B_CL:
+    case Opcode::IMAGE_SAMPLE_B_CL_O:
+    case Opcode::IMAGE_SAMPLE_C_CL:
+    case Opcode::IMAGE_SAMPLE_C_CL_O:
+    case Opcode::IMAGE_SAMPLE_C_B_CL:
+    case Opcode::IMAGE_SAMPLE_C_B_CL_O:
+        if (!profile.needs_image_sample_clamp) {
+            return LogMissingOpcode(inst);
+        }
+        return IMAGE_SAMPLE(inst);
+
+    case Opcode::IMAGE_SAMPLE_D_CL:
+    case Opcode::IMAGE_SAMPLE_D_CL_O:
+    case Opcode::IMAGE_SAMPLE_CD_CL:
+    case Opcode::IMAGE_SAMPLE_CD_O:
+    case Opcode::IMAGE_SAMPLE_CD_CL_O:
+        if (!profile.needs_image_gradients) {
+            return LogMissingOpcode(inst);
+        }
+        return IMAGE_SAMPLE(inst);
+
+    case Opcode::IMAGE_SAMPLE_C_CD:
+    case Opcode::IMAGE_SAMPLE_C_CD_CL:
+    case Opcode::IMAGE_SAMPLE_C_CD_O:
+    case Opcode::IMAGE_SAMPLE_C_CD_CL_O:
+        if (!profile.needs_image_gradients || !profile.needs_depth_compare_gradients) {
+            return LogMissingOpcode(inst);
+        }
+        return IMAGE_SAMPLE(inst);
+
+    case Opcode::IMAGE_SAMPLE_C_D:
+    case Opcode::IMAGE_SAMPLE_C_D_CL:
+    case Opcode::IMAGE_SAMPLE_C_D_O:
+    case Opcode::IMAGE_SAMPLE_C_D_CL_O:
+        if (!profile.needs_depth_compare_gradients) {
+            return LogMissingOpcode(inst);
+        }
+        return IMAGE_SAMPLE(inst);
+
+    case Opcode::IMAGE_SAMPLE_C_L:
+    case Opcode::IMAGE_SAMPLE_C_L_O:
+        if (!profile.needs_depth_compare_explicit_lod) {
+            return LogMissingOpcode(inst);
+        }
+        return IMAGE_SAMPLE(inst);
+
     case Opcode::IMAGE_SAMPLE:
     case Opcode::IMAGE_SAMPLE_D:
     case Opcode::IMAGE_SAMPLE_L:
@@ -184,6 +280,26 @@ void Translator::EmitVectorMemory(const GcnInst& inst) {
         return IMAGE_SAMPLE(inst);
 
         // Image gather operations
+    case Opcode::IMAGE_GATHER4_CL:
+    case Opcode::IMAGE_GATHER4_B:
+    case Opcode::IMAGE_GATHER4_B_CL:
+    case Opcode::IMAGE_GATHER4_C_CL:
+    case Opcode::IMAGE_GATHER4_C_L:
+    case Opcode::IMAGE_GATHER4_C_B:
+    case Opcode::IMAGE_GATHER4_C_B_CL:
+    case Opcode::IMAGE_GATHER4_CL_O:
+    case Opcode::IMAGE_GATHER4_L_O:
+    case Opcode::IMAGE_GATHER4_B_O:
+    case Opcode::IMAGE_GATHER4_B_CL_O:
+    case Opcode::IMAGE_GATHER4_C_CL_O:
+    case Opcode::IMAGE_GATHER4_C_L_O:
+    case Opcode::IMAGE_GATHER4_C_B_O:
+    case Opcode::IMAGE_GATHER4_C_B_CL_O:
+        if (!profile.needs_image_gather_lod) {
+            return LogMissingOpcode(inst);
+        }
+        return IMAGE_GATHER(inst);
+
     case Opcode::IMAGE_GATHER4:
     case Opcode::IMAGE_GATHER4_L:
     case Opcode::IMAGE_GATHER4_LZ:
@@ -382,15 +498,30 @@ void Translator::BUFFER_ATOMIC(AtomicOp op, const GcnInst& inst) {
         case AtomicOp::Swap:
             return ir.BufferAtomicSwap(handle, address, vdata_val, buffer_info);
         case AtomicOp::CmpSwap: {
-            const IR::Value cmp_val = ir.GetVectorReg(vdata + 1);
+            const IR::Value cmp_val = [&]() -> IR::Value {
+                if constexpr (std::is_same_v<T, IR::U64>) {
+                    return ir.PackUint2x32(ir.CompositeConstruct(ir.GetVectorReg(vdata + 2),
+                                                                 ir.GetVectorReg(vdata + 3)));
+                } else {
+                    return ir.GetVectorReg(vdata + 1);
+                }
+            }();
             return ir.BufferAtomicCmpSwap(handle, address, vdata_val, cmp_val, buffer_info);
         }
         case AtomicOp::FCmpSwap: {
-            const IR::Value cmp_val = ir.GetVectorReg(vdata + 1);
-            return ir.BufferAtomicFCmpSwap(handle, address, vdata_val, cmp_val, buffer_info);
+            if constexpr (std::is_same_v<T, IR::U64>) {
+                const auto cmp_val = ir.PackUint2x32(
+                    ir.CompositeConstruct(ir.GetVectorReg(vdata + 2), ir.GetVectorReg(vdata + 3)));
+                return ir.BufferAtomicFCmpSwapRaw(handle, address, vdata_val, cmp_val, buffer_info);
+            } else {
+                const IR::Value cmp_val = ir.GetVectorReg(vdata + 1);
+                return ir.BufferAtomicFCmpSwap(handle, address, vdata_val, cmp_val, buffer_info);
+            }
         }
         case AtomicOp::Add:
             return ir.BufferAtomicIAdd(handle, address, vdata_val, buffer_info);
+        case AtomicOp::Sub:
+            return ir.BufferAtomicISub(handle, address, vdata_val, buffer_info);
         case AtomicOp::Smin:
             return ir.BufferAtomicIMin(handle, address, vdata_val, true, buffer_info);
         case AtomicOp::Umin:
@@ -406,8 +537,24 @@ void Translator::BUFFER_ATOMIC(AtomicOp op, const GcnInst& inst) {
         case AtomicOp::Xor:
             return ir.BufferAtomicXor(handle, address, vdata_val, buffer_info);
         case AtomicOp::Inc:
+            if constexpr (std::is_same_v<T, IR::U64>) {
+                return IR::Value{
+                    ir.BufferAtomicInc(handle, address, IR::U64{vdata_val}, buffer_info)};
+            }
+            if (profile.needs_bounded_atomic_counters) {
+                return IR::Value{
+                    ir.BufferAtomicInc(handle, address, IR::U32{vdata_val}, buffer_info)};
+            }
             return ir.BufferAtomicInc(handle, address, buffer_info);
         case AtomicOp::Dec:
+            if constexpr (std::is_same_v<T, IR::U64>) {
+                return IR::Value{
+                    ir.BufferAtomicDec(handle, address, IR::U64{vdata_val}, buffer_info)};
+            }
+            if (profile.needs_bounded_atomic_counters) {
+                return IR::Value{
+                    ir.BufferAtomicDec(handle, address, IR::U32{vdata_val}, buffer_info)};
+            }
             return ir.BufferAtomicDec(handle, address, buffer_info);
         case AtomicOp::Fmin:
             return ir.BufferAtomicFMin(handle, address, vdata_val, buffer_info);
@@ -420,7 +567,12 @@ void Translator::BUFFER_ATOMIC(AtomicOp op, const GcnInst& inst) {
 
     if (mubuf.glc) {
         if constexpr (std::is_same_v<T, IR::U64>) {
-            UNREACHABLE();
+            if (!profile.needs_extended_buffer_atomics) {
+                UNREACHABLE();
+            }
+            const auto words = ir.UnpackUint2x32(IR::U64{original_val});
+            ir.SetVectorReg(vdata, IR::U32{ir.CompositeExtract(words, 0)});
+            ir.SetVectorReg(vdata + 1, IR::U32{ir.CompositeExtract(words, 1)});
         } else {
             ir.SetVectorReg(vdata, T{original_val});
         }
@@ -541,6 +693,15 @@ void Translator::IMAGE_GET_RESINFO(const GcnInst& inst) {
 
 void Translator::IMAGE_ATOMIC(AtomicOp op, const GcnInst& inst) {
     const auto& mimg = inst.control.mimg;
+    if (profile.needs_typed_image_atomics) {
+        const bool compare_swap = op == AtomicOp::CmpSwap || op == AtomicOp::FCmpSwap;
+        if (mimg.dmask == (compare_swap ? 0xfu : 0x3u)) {
+            throw std::runtime_error("Metal 64-bit image atomics require native width lowering");
+        }
+        if (mimg.dmask != (compare_swap ? 0x3u : 0x1u)) {
+            throw std::runtime_error("Invalid Metal guest image atomic DMASK");
+        }
+    }
     IR::VectorReg val_reg{inst.dst[0].code};
     IR::VectorReg addr_reg{inst.src[0].code};
     const IR::ScalarReg tsharp_reg{inst.src[2].code * 4};
@@ -549,7 +710,11 @@ void Translator::IMAGE_ATOMIC(AtomicOp op, const GcnInst& inst) {
     info.is_array.Assign(mimg.da);
     info.is_r128.Assign(mimg.r128);
 
-    const IR::Value value = ir.GetVectorReg(val_reg);
+    const bool is_float =
+        profile.needs_software_float_atomics &&
+        (op == AtomicOp::Fmin || op == AtomicOp::Fmax || op == AtomicOp::FCmpSwap);
+    const IR::Value value =
+        is_float ? IR::Value{ir.GetVectorReg<IR::F32>(val_reg)} : ir.GetVectorReg(val_reg);
     const IR::Value tsharp_low =
         ir.CompositeConstruct(ir.GetScalarReg(tsharp_reg), ir.GetScalarReg(tsharp_reg + 1),
                               ir.GetScalarReg(tsharp_reg + 2), ir.GetScalarReg(tsharp_reg + 3));
@@ -566,13 +731,21 @@ void Translator::IMAGE_ATOMIC(AtomicOp op, const GcnInst& inst) {
     const IR::Value prev = [&] {
         switch (op) {
         case AtomicOp::Swap:
-            return ir.ImageAtomicExchange(handle, body, value, {});
+            return ir.ImageAtomicExchange(
+                handle, body, value,
+                profile.needs_typed_image_atomics ? info : IR::TextureInstInfo{});
         case AtomicOp::CmpSwap: {
             const IR::Value cmp_val = ir.GetVectorReg(val_reg + 1);
             return ir.ImageAtomicCmpSwap(handle, body, value, cmp_val, info);
         }
+        case AtomicOp::FCmpSwap: {
+            const IR::F32 cmp_val = ir.GetVectorReg<IR::F32>(val_reg + 1);
+            return ir.ImageAtomicFCmpSwap(handle, body, value, cmp_val, info);
+        }
         case AtomicOp::Add:
             return ir.ImageAtomicIAdd(handle, body, value, info);
+        case AtomicOp::Sub:
+            return ir.ImageAtomicIAdd(handle, body, ir.ISub(ir.Imm32(0), IR::U32{value}), info);
         case AtomicOp::Smin:
             return ir.ImageAtomicIMin(handle, body, value, true, info);
         case AtomicOp::Umin:
@@ -600,13 +773,13 @@ void Translator::IMAGE_ATOMIC(AtomicOp op, const GcnInst& inst) {
         }
     }();
     if (mimg.glc) {
-        ir.SetVectorReg(val_reg, IR::U32{prev});
+        ir.SetVectorReg(val_reg, is_float ? ir.BitCast<IR::U32>(IR::F32{prev}) : IR::U32{prev});
     }
 }
 
 IR::Value EmitImageSample(IR::IREmitter& ir, const GcnInst& inst, const IR::ScalarReg tsharp_reg,
                           const IR::ScalarReg sampler_reg, const IR::VectorReg addr_reg,
-                          bool gather, u32 pc) {
+                          bool gather, u32 pc, bool coarse_derivatives = false) {
     const auto& mimg = inst.control.mimg;
     const auto flags = MimgModifierFlags(mimg.mod);
 
@@ -626,7 +799,9 @@ IR::Value EmitImageSample(IR::IREmitter& ir, const GcnInst& inst, const IR::Scal
         info.gather_comp.Assign(std::bit_width(mimg.dmask) - 1);
         info.is_gather.Assign(true);
     } else {
-        info.has_derivatives.Assign(flags.test(MimgModifier::Derivative));
+        info.has_derivatives.Assign(
+            flags.test(MimgModifier::Derivative) ||
+            (coarse_derivatives && flags.test(MimgModifier::CoarseDerivative)));
     }
 
     // Load all dwords of T# and S#. We will use them as the handle that will guide
@@ -697,7 +872,8 @@ void Translator::IMAGE_SAMPLE(const GcnInst& inst) {
     const IR::ScalarReg sampler_reg{inst.src[3].code * 4};
     const auto flags = MimgModifierFlags(mimg.mod);
 
-    const IR::Value texel = EmitImageSample(ir, inst, tsharp_reg, sampler_reg, addr_reg, false, pc);
+    const IR::Value texel = EmitImageSample(ir, inst, tsharp_reg, sampler_reg, addr_reg, false, pc,
+                                            profile.needs_image_gradients);
     for (u32 i = 0; i < 4; i++) {
         if (((mimg.dmask >> i) & 1) == 0) {
             continue;
@@ -742,6 +918,7 @@ void Translator::IMAGE_GET_LOD(const GcnInst& inst) {
     IR::TextureInstInfo info{};
     info.is_array.Assign(mimg.da);
     info.is_r128.Assign(mimg.r128);
+    info.is_unnormalized.Assign(profile.needs_image_query_lod_sampler && mimg.unrm);
 
     const IR::Value tsharp_low =
         ir.CompositeConstruct(ir.GetScalarReg(tsharp_reg), ir.GetScalarReg(tsharp_reg + 1),
@@ -755,7 +932,15 @@ void Translator::IMAGE_GET_LOD(const GcnInst& inst) {
     const IR::Value body = ir.CompositeConstruct(
         ir.GetVectorReg<IR::F32>(addr_reg), ir.GetVectorReg<IR::F32>(addr_reg + 1),
         ir.GetVectorReg<IR::F32>(addr_reg + 2), ir.GetVectorReg<IR::F32>(addr_reg + 3));
-    const IR::Value lod = ir.ImageQueryLod(ir.ImageHandle(tsharp_low, tsharp_high), body, info);
+    IR::Value sampler_handle;
+    if (profile.needs_image_query_lod_sampler) {
+        const IR::ScalarReg sampler_reg{inst.src[3].code * 4};
+        sampler_handle = ir.CompositeConstruct(
+            ir.GetScalarReg(sampler_reg), ir.GetScalarReg(sampler_reg + 1),
+            ir.GetScalarReg(sampler_reg + 2), ir.GetScalarReg(sampler_reg + 3));
+    }
+    const IR::Value lod =
+        ir.ImageQueryLod(ir.ImageHandle(tsharp_low, tsharp_high), body, info, sampler_handle);
     if (mimg.dmask & 1) {
         ir.SetVectorReg(dst_reg++, IR::F32{ir.CompositeExtract(lod, 0)});
     }

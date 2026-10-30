@@ -3,14 +3,27 @@
 
 #pragma once
 
+#include <functional>
 #include "common/object_pool.h"
 #include "shader_recompiler/ir/basic_block.h"
+#include "shader_recompiler/ir/passes/resource_pass.h"
 #include "shader_recompiler/ir/program.h"
 
 namespace Shader {
 
 struct Profile;
 struct RuntimeInfo;
+
+namespace IR {
+class IREmitter;
+}
+
+struct TranslationHooks {
+    std::function<void(IR::Program&, IR::IREmitter&)> prologue;
+    std::function<bool(IR::Program&, RuntimeInfo&)> lower_rings;
+    std::function<void(IR::Program&)> lower_resources;
+    std::function<void(IR::Program&)> structured;
+};
 
 struct Pools {
     static constexpr u32 InstPoolSize = 8192;
@@ -29,6 +42,11 @@ struct Pools {
 
 [[nodiscard]] IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools,
                                            Info& info, RuntimeInfo& runtime_info,
-                                           const Profile& profile);
+                                           const Profile& profile,
+                                           void (*lower_resources)(IR::Program&) = nullptr,
+                                           bool (*patch_buffer)(IR::Inst&, Info&) = nullptr,
+                                           ImageReadConverter convert_image_read = nullptr,
+                                           ImageSampleConverter convert_image_sample = nullptr,
+                                           const TranslationHooks* hooks = nullptr);
 
 } // namespace Shader

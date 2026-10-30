@@ -42,9 +42,9 @@ public:
     void Discard(const U1& cond);
     void DebugPrint(const char* fmt, boost::container::small_vector<Value, 5> args);
 
-    void Barrier();
+    void Barrier(MemoryClass memory = MemoryClass::None);
     void WorkgroupMemoryBarrier();
-    void DeviceMemoryBarrier();
+    void DeviceMemoryBarrier(MemoryClass memory = MemoryClass::All);
     void SubgroupBarrier();
 
     [[nodiscard]] U32 GetUserData(IR::ScalarReg reg);
@@ -55,6 +55,9 @@ public:
     [[nodiscard]] T GetVectorReg(IR::VectorReg reg);
     void SetScalarReg(IR::ScalarReg reg, const U32F32& value);
     void SetVectorReg(IR::VectorReg reg, const U32F32& value);
+    void SetVectorPredicate(const U1& predicate);
+    void BeginMemoryAccess(const U1& predicate);
+    void EndMemoryAccess();
 
     [[nodiscard]] Value GetVirtualReg(IR::VirtualReg reg);
     void SetVirtualReg(IR::VirtualReg reg, const Value& value);
@@ -107,36 +110,61 @@ public:
     [[nodiscard]] U32U64 SharedAtomicXor(const U32& address, const U32U64& data, bool is_gds);
     [[nodiscard]] U32U64 SharedAtomicCmpSwap(const U32& address, const U32U64& value,
                                              const U32U64& cmp_value, bool is_gds);
+    [[nodiscard]] U32U64 SharedAtomicFCmpSwap(const U32& address, const U32U64& value,
+                                              const U32U64& cmp_value, bool is_gds);
 
     template <typename T = U32>
     [[nodiscard]] T SharedAtomicInc(const U32& address, bool is_gds);
     template <typename T = U32>
     [[nodiscard]] T SharedAtomicDec(const U32& address, bool is_gds);
+    [[nodiscard]] U32 SharedAtomicInc(const U32& address, const U32& bound, bool is_gds);
+    [[nodiscard]] U32 SharedAtomicDec(const U32& address, const U32& bound, bool is_gds);
+    [[nodiscard]] U32 SharedAtomicRSub(const U32& address, const U32& data, bool is_gds);
+    [[nodiscard]] U32 SharedAtomicMaskOr(const U32& address, const U32& mask, const U32& data,
+                                         bool is_gds);
+    [[nodiscard]] U64 SharedAtomicInc(const U32& address, const U64& bound, bool is_gds);
+    [[nodiscard]] U64 SharedAtomicDec(const U32& address, const U64& bound, bool is_gds);
+    [[nodiscard]] U64 SharedAtomicRSub(const U32& address, const U64& data, bool is_gds);
+    [[nodiscard]] U64 SharedAtomicMaskOr(const U32& address, const U64& mask, const U64& data,
+                                         bool is_gds);
+    [[nodiscard]] U64 SharedAtomicExchange(const U32& address, const U64& data, bool is_gds);
+    [[nodiscard]] U32 SharedAtomicWrap(const U32& address, const U32& subtract, const U32& add,
+                                       bool is_gds);
+    [[nodiscard]] U32 SharedAtomicExchange(const U32& address, const U32& data, bool is_gds);
+
+    void SharedAtomicSrc2(u32 bit_size, const U32& address, const U32& source,
+                          SharedMemoryOperation operation, bool is_gds);
+    void BufferAtomicSrc2(u32 bit_size, const U32& handle, const U32& address, const U32& source,
+                          SharedMemoryOperation operation);
 
     [[nodiscard]] U32 ReadConst(const Value& base, const U32& offset);
-    [[nodiscard]] U32 ReadConstBuffer(const Value& handle, const U32& index, BufferInstInfo info);
+    [[nodiscard]] U32 ReadConstBuffer(const Value& handle, const U32& index, BufferInstInfo info,
+                                      const Value& guest_address = {});
+    [[nodiscard]] U32 GuardBufferAddress(const U32& address, const U1& in_bounds);
 
-    [[nodiscard]] U8 LoadBufferU8(const Value& handle, const Value& address, BufferInstInfo info);
-    [[nodiscard]] U16 LoadBufferU16(const Value& handle, const Value& address, BufferInstInfo info);
+    [[nodiscard]] U8 LoadBufferU8(const Value& handle, const Value& address, BufferInstInfo info,
+                                  const Value& guest_address = {});
+    [[nodiscard]] U16 LoadBufferU16(const Value& handle, const Value& address, BufferInstInfo info,
+                                    const Value& guest_address = {});
     [[nodiscard]] Value LoadBufferU32(int num_dwords, const Value& handle, const Value& address,
-                                      BufferInstInfo info);
+                                      BufferInstInfo info, const Value& guest_address = {});
     [[nodiscard]] U64 LoadBufferU64(const Value& handle, const Value& address, BufferInstInfo info);
     [[nodiscard]] Value LoadBufferF32(int num_dwords, const Value& handle, const Value& address,
-                                      BufferInstInfo info);
+                                      BufferInstInfo info, const Value& guest_address = {});
     [[nodiscard]] Value LoadBufferFormat(const Value& handle, const Value& address,
-                                         BufferInstInfo info);
+                                         BufferInstInfo info, const Value& guest_address = {});
     void StoreBufferU8(const Value& handle, const Value& address, const U8& data,
-                       BufferInstInfo info);
+                       BufferInstInfo info, const Value& guest_address = {});
     void StoreBufferU16(const Value& handle, const Value& address, const U16& data,
-                        BufferInstInfo info);
+                        BufferInstInfo info, const Value& guest_address = {});
     void StoreBufferU32(int num_dwords, const Value& handle, const Value& address,
-                        const Value& data, BufferInstInfo info);
+                        const Value& data, BufferInstInfo info, const Value& guest_address = {});
     void StoreBufferU64(const Value& handle, const Value& address, const U64& data,
                         BufferInstInfo info);
     void StoreBufferF32(int num_dwords, const Value& handle, const Value& address,
-                        const Value& data, BufferInstInfo info);
+                        const Value& data, BufferInstInfo info, const Value& guest_address = {});
     void StoreBufferFormat(const Value& handle, const Value& address, const Value& data,
-                           BufferInstInfo info);
+                           BufferInstInfo info, const Value& guest_address = {});
 
     [[nodiscard]] Value BufferAtomicIAdd(const Value& handle, const Value& address,
                                          const Value& value, BufferInstInfo info);
@@ -154,6 +182,10 @@ public:
                                         BufferInstInfo info);
     [[nodiscard]] Value BufferAtomicDec(const Value& handle, const Value& address,
                                         BufferInstInfo info);
+    [[nodiscard]] U32 BufferAtomicInc(const Value& handle, const Value& address, const U32& bound,
+                                      BufferInstInfo info);
+    [[nodiscard]] U32 BufferAtomicDec(const Value& handle, const Value& address, const U32& bound,
+                                      BufferInstInfo info);
     [[nodiscard]] Value BufferAtomicAnd(const Value& handle, const Value& address,
                                         const Value& value, BufferInstInfo info);
     [[nodiscard]] Value BufferAtomicOr(const Value& handle, const Value& address,
@@ -162,9 +194,26 @@ public:
                                         const Value& value, BufferInstInfo info);
     [[nodiscard]] Value BufferAtomicSwap(const Value& handle, const Value& address,
                                          const Value& value, BufferInstInfo info);
+    [[nodiscard]] U32 BufferAtomicRSub(const Value& handle, const Value& address, const U32& value,
+                                       BufferInstInfo info);
+    [[nodiscard]] U32 BufferAtomicMaskOr(const Value& handle, const Value& address, const U32& mask,
+                                         const U32& value, BufferInstInfo info);
+    [[nodiscard]] U64 BufferAtomicInc(const Value& handle, const Value& address, const U64& bound,
+                                      BufferInstInfo info);
+    [[nodiscard]] U64 BufferAtomicDec(const Value& handle, const Value& address, const U64& bound,
+                                      BufferInstInfo info);
+    [[nodiscard]] U64 BufferAtomicRSub(const Value& handle, const Value& address, const U64& value,
+                                       BufferInstInfo info);
+    [[nodiscard]] U64 BufferAtomicMaskOr(const Value& handle, const Value& address, const U64& mask,
+                                         const U64& value, BufferInstInfo info);
+    [[nodiscard]] U32 BufferAtomicWrap(const Value& handle, const Value& address,
+                                       const U32& subtract, const U32& add, BufferInstInfo info);
     [[nodiscard]] Value BufferAtomicCmpSwap(const Value& handle, const Value& address,
                                             const Value& value, const Value& cmp_value,
                                             BufferInstInfo info);
+    [[nodiscard]] Value BufferAtomicFCmpSwapRaw(const Value& handle, const Value& address,
+                                                const Value& value, const Value& cmp_value,
+                                                BufferInstInfo info);
     [[nodiscard]] Value BufferAtomicFCmpSwap(const Value& handle, const Value& address,
                                              const Value& value, const Value& cmp_value,
                                              BufferInstInfo info);
@@ -368,6 +417,9 @@ public:
     [[nodiscard]] Value ImageAtomicCmpSwap(const Value& handle, const Value& coords,
                                            const Value& value, const Value& cmp_value,
                                            TextureInstInfo info);
+    [[nodiscard]] Value ImageAtomicFCmpSwap(const Value& handle, const Value& coords,
+                                            const Value& value, const Value& cmp_value,
+                                            TextureInstInfo info);
 
     [[nodiscard]] Value ImageHandle(const Value& tsharp_low, const Value& tsharp_high);
 
@@ -378,7 +430,7 @@ public:
 
     [[nodiscard]] Value ImageSampleImplicitLod(const Value& handle, const Value& body,
                                                const F32& bias, const Value& offset,
-                                               TextureInstInfo info);
+                                               TextureInstInfo info, const F32& lod_clamp = {});
 
     [[nodiscard]] Value ImageSampleExplicitLod(const Value& handle, const Value& body,
                                                const F32& lod, const Value& offset,
@@ -386,21 +438,29 @@ public:
 
     [[nodiscard]] Value ImageSampleDrefImplicitLod(const Value& handle, const Value& body,
                                                    const F32& dref, const F32& bias,
-                                                   const Value& offset, TextureInstInfo info);
+                                                   const Value& offset, TextureInstInfo info,
+                                                   const F32& lod_clamp = {});
 
     [[nodiscard]] Value ImageSampleDrefExplicitLod(const Value& handle, const Value& body,
                                                    const F32& dref, const F32& lod,
                                                    const Value& offset, TextureInstInfo info);
 
+    [[nodiscard]] Value ImageSampleDrefGradient(const Value& handle, const Value& coords,
+                                                const Value& derivatives_dx,
+                                                const Value& derivatives_dy, const Value& offset,
+                                                const F32& dref, const F32& lod_clamp,
+                                                TextureInstInfo info);
+
     [[nodiscard]] Value ImageQueryDimension(const Value& handle, const U32& lod,
                                             const U1& skip_mips, TextureInstInfo info);
 
     [[nodiscard]] Value ImageQueryLod(const Value& handle, const Value& coords,
-                                      TextureInstInfo info);
+                                      TextureInstInfo info, const Value& sampler_handle = {});
     [[nodiscard]] Value ImageGather(const Value& handle, const Value& coords, const Value& offset,
-                                    TextureInstInfo info);
+                                    TextureInstInfo info, const Value& lod_info = {});
     [[nodiscard]] Value ImageGatherDref(const Value& handle, const Value& coords,
-                                        const Value& offset, const F32& dref, TextureInstInfo info);
+                                        const Value& offset, const F32& dref, TextureInstInfo info,
+                                        const Value& lod_info = {});
     [[nodiscard]] Value ImageGradient(const Value& handle, const Value& coords,
                                       const Value& derivatives_dx, const Value& derivatives_dy,
                                       const Value& offset, const F32& lod_clamp,
@@ -415,13 +475,16 @@ public:
     [[nodiscard]] F32 CubeFaceCoordT(const Value& x, const Value& y, const Value& z);
     [[nodiscard]] F32 CubeFaceMajorAxis(const Value& x, const Value& y, const Value& z);
 
-    void EmitVertex();
-    void EmitPrimitive();
+    void EmitVertex(u32 stream = 0);
+    void EmitVertex(u32 stream, const U1& predicate);
+    void EmitPrimitive(u32 stream = 0);
+    void EmitPrimitive(u32 stream, const U1& predicate);
     U64 Memtime();
 
 private:
     Block* block;
     IR::Block::iterator insertion_point;
+    U1 vector_predicate;
 
     template <typename T = Value, typename... Args>
     T Inst(Opcode op, Args... args) {

@@ -34,7 +34,7 @@ struct VertexAttribute {
         return static_cast<InstanceIdType>(instance_data);
     }
 
-    constexpr AmdGpu::Buffer GetSharp(const Shader::Info& info) const noexcept {
+    constexpr AmdGpu::Buffer GetSharp(const Shader::Info& info) const {
         auto buffer = info.ReadUdReg<AmdGpu::Buffer>(sgpr_base, dword_offset);
         buffer.base_address += inst_offset;
         if (data_format) {
@@ -52,9 +52,11 @@ struct FetchShaderData {
     SmallVector<VertexAttribute, 8> attributes;
     s8 vertex_offset_sgpr = -1;   ///< SGPR of vertex offset from VADDR
     s8 instance_offset_sgpr = -1; ///< SGPR of instance offset from VADDR
+    bool requires_native_lowering{};
 
     bool operator==(const FetchShaderData& other) const {
-        return attributes == other.attributes && vertex_offset_sgpr == other.vertex_offset_sgpr &&
+        return requires_native_lowering == other.requires_native_lowering &&
+               attributes == other.attributes && vertex_offset_sgpr == other.vertex_offset_sgpr &&
                instance_offset_sgpr == other.instance_offset_sgpr;
     }
 
@@ -66,7 +68,7 @@ struct FetchShaderData {
     bool Deserialize(Serialization::Archive& buffer);
 };
 
-const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base);
+std::span<const u32> GetFetchShaderCode(const Info& info, u32 sgpr_base);
 
 bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data);
 

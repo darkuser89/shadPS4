@@ -6,6 +6,8 @@
 #include "shader_recompiler/ir/debug_print.h"
 #include "shader_recompiler/ir/microinstruction.h"
 
+#include <stdexcept>
+
 namespace Shader::Backend::SPIRV {
 
 void EmitPrologue(EmitContext& ctx) {
@@ -16,6 +18,7 @@ void EmitPrologue(EmitContext& ctx) {
         ctx.DefineWorkgroupIndex();
     }
     ctx.DefineBufferProperties();
+    ctx.InitializeSharedMemoryLock();
 }
 
 void ConvertDepthMode(EmitContext& ctx) {
@@ -91,16 +94,30 @@ void EmitDiscardCond(EmitContext& ctx, Id condition) {
     ctx.AddLabel(merge_label);
 }
 
-void EmitEmitVertex(EmitContext& ctx) {
+void EmitEmitVertex(EmitContext& ctx, IR::Inst* inst) {
+    if (ctx.profile.needs_geometry_output_lowering || inst->Flags<u32>() != 0) {
+        throw std::runtime_error("Native geometry vertex emission requires lowering");
+    }
     ctx.OpEmitVertex();
 }
 
-void EmitEmitPrimitive(EmitContext& ctx) {
+void EmitEmitPrimitive(EmitContext& ctx, IR::Inst* inst) {
+    if (ctx.profile.needs_geometry_output_lowering || inst->Flags<u32>() != 0) {
+        throw std::runtime_error("Native geometry primitive emission requires lowering");
+    }
     ctx.OpEndPrimitive();
 }
 
 void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
     UNREACHABLE_MSG("Geometry streams");
+}
+
+void EmitEmitVertexMasked(EmitContext&, IR::Inst*, Id) {
+    throw std::runtime_error("Masked geometry vertex emission requires lowering");
+}
+
+void EmitEmitPrimitiveMasked(EmitContext&, IR::Inst*, Id) {
+    throw std::runtime_error("Masked geometry primitive emission requires lowering");
 }
 
 void EmitEndPrimitive(EmitContext& ctx, const IR::Value& stream) {

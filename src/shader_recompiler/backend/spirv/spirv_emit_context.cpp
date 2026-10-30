@@ -72,7 +72,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
                          Bindings& binding_)
     : Sirit::Module(profile_.supported_spirv), info{info_}, runtime_info{runtime_info_},
       profile{profile_}, hw_stage{info.hw_stage}, sw_stage{info.sw_stage}, binding{binding_} {
-    if (info.uses_dma) {
+    if (info.uses_dma || info.uses_guest_page_reads) {
         SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
     } else {
         SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
@@ -173,7 +173,7 @@ void EmitContext::DefineArithmeticTypes() {
     if (info.uses_fp64) {
         frexp_result_f64 = Name(TypeStruct(F64[1], S32[1]), "frexp_result_f64");
     }
-    if (info.uses_dma) {
+    if (info.uses_dma || info.uses_guest_page_reads) {
         physical_pointer_type_u32 = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
     }
 }
@@ -970,16 +970,23 @@ Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
     const auto format = desc.is_atomic ? GetFormat(image) : spv::ImageFormat::Unknown;
     const auto type = image.GetViewType(desc.is_array);
     const u32 sampled = desc.is_written ? 2 : 1;
+    const bool depth =
+        ctx.profile.needs_unorm32_depth_conversion && desc.RequiresUnorm32DepthConversion(image);
     switch (type) {
     case AmdGpu::ImageType::Color1D:
     case AmdGpu::ImageType::Color2D:
-        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, false, false, sampled, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, depth, false, false, sampled, format);
     case AmdGpu::ImageType::Color1DArray:
     case AmdGpu::ImageType::Color2DArray:
     case AmdGpu::ImageType::Cube:
-        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, true, false, sampled, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, depth, true, false, sampled, format);
     case AmdGpu::ImageType::Color2DMsaa:
-        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, false, true, sampled, format);
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, depth, false, true, sampled, format);
+    case AmdGpu::ImageType::Color2DMsaaArray:
+        if (ctx.profile.needs_multisample_array_images) {
+            return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, depth, true, true, sampled, format);
+        }
+        break;
     case AmdGpu::ImageType::Color3D:
         return ctx.TypeImage(sampled_type, spv::Dim::Dim3D, false, false, false, sampled, format);
     default:
@@ -991,7 +998,10 @@ Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
 void EmitContext::DefineImagesAndSamplers() {
     for (const auto& image_desc : info.images) {
         const auto sharp = image_desc.GetSharp(info);
-        const auto nfmt = sharp.GetNumberFmt();
+        const auto nfmt = profile.needs_unorm32_depth_conversion &&
+                                  image_desc.RequiresUnorm32DepthConversion(sharp)
+                              ? AmdGpu::NumberFormat::Float
+                              : sharp.GetNumberFmt();
         const bool is_integer = AmdGpu::IsInteger(nfmt);
         const bool is_storage = image_desc.is_written;
         const MipStorageFallbackMode mip_fallback_mode = image_desc.mip_fallback_mode;
@@ -1044,6 +1054,12 @@ void EmitContext::DefineImagesAndSamplers() {
 }
 
 void EmitContext::DefineSharedMemory() {
+    if (info.uses_shared_memory_lock) {
+        const Id pointer = TypePointer(spv::StorageClass::Workgroup, U32[1]);
+        shared_memory_lock = AddGlobalVariable(pointer, spv::StorageClass::Workgroup);
+        Name(shared_memory_lock, "shared_memory_lock");
+        interfaces.push_back(shared_memory_lock);
+    }
     const auto num_types = std::popcount(static_cast<u32>(info.shared_types));
     if (num_types == 0) {
         return;
@@ -1092,6 +1108,57 @@ void EmitContext::DefineSharedMemory() {
         make_type(IR::Type::U32, U32[1], 4u, "shared_mem_u32");
     std::tie(shared_memory_u64, shared_u64, shared_memory_u64_type) =
         make_type(IR::Type::U64, U64, 8u, "shared_mem_u64");
+}
+
+void EmitContext::InitializeSharedMemoryLock() {
+    if (!Sirit::ValidId(shared_memory_lock)) {
+        return;
+    }
+    const Id local = OpLoad(U32[3], local_invocation_id);
+    const Id zero = OpCompositeConstruct(U32[3], u32_zero_value, u32_zero_value, u32_zero_value);
+    const Id first = OpAll(U1[1], OpIEqual(U1[3], local, zero));
+    const Id initialize = OpLabel();
+    const Id merge = OpLabel();
+    OpSelectionMerge(merge, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(first, initialize, merge);
+    AddLabel(initialize);
+    OpStore(shared_memory_lock, u32_zero_value);
+    OpBranch(merge);
+    AddLabel(merge);
+    const Id scope = ConstU32(static_cast<u32>(spv::Scope::Workgroup));
+    const auto semantics =
+        spv::MemorySemanticsMask::AcquireRelease | spv::MemorySemanticsMask::WorkgroupMemory;
+    OpControlBarrier(scope, scope, ConstU32(static_cast<u32>(semantics)));
+}
+
+Id EmitContext::WithSharedMemoryLock(const std::function<Id()>& operation, bool shared) {
+    if (!shared || !Sirit::ValidId(shared_memory_lock)) {
+        return operation();
+    }
+    const Id scope = ConstU32(static_cast<u32>(spv::Scope::Workgroup));
+    const Id loop = OpLabel();
+    const Id critical = OpLabel();
+    const Id continuation = OpLabel();
+    const Id merge = OpLabel();
+    OpBranch(loop);
+    AddLabel(loop);
+    const Id previous = OpAtomicCompareExchange(U32[1], shared_memory_lock, scope, u32_zero_value,
+                                                u32_zero_value, ConstU32(1u), u32_zero_value);
+    const Id acquired = OpIEqual(U1[1], previous, u32_zero_value);
+    OpLoopMerge(merge, continuation, spv::LoopControlMask::MaskNone);
+    OpBranchConditional(acquired, critical, continuation);
+    AddLabel(critical);
+    const auto memory =
+        spv::MemorySemanticsMask::WorkgroupMemory | spv::MemorySemanticsMask::UniformMemory;
+    OpMemoryBarrier(scope, ConstU32(static_cast<u32>(memory | spv::MemorySemanticsMask::Acquire)));
+    const Id result = operation();
+    OpMemoryBarrier(scope, ConstU32(static_cast<u32>(memory | spv::MemorySemanticsMask::Release)));
+    OpAtomicStore(shared_memory_lock, scope, u32_zero_value, u32_zero_value);
+    OpBranch(merge);
+    AddLabel(continuation);
+    OpBranch(loop);
+    AddLabel(merge);
+    return result;
 }
 
 Id EmitContext::DefineFloat32ToUfloatM5(u32 mantissa_bits, const std::string_view name) {
@@ -1275,7 +1342,185 @@ Id EmitContext::DefineReadConst(bool dynamic) {
     return func;
 }
 
+Id EmitContext::DefineGuestPagePointer() {
+    if (!profile.support_int64 || profile.guest_page_shift < 2 || profile.guest_page_shift >= 40 ||
+        !profile.guest_page_leaf_bits || profile.guest_page_leaf_bits >= 40 ||
+        profile.guest_page_shift + profile.guest_page_leaf_bits < 8 ||
+        profile.guest_page_shift + profile.guest_page_leaf_bits >= 40) {
+        throw std::runtime_error("Invalid native guest page-table profile");
+    }
+    const auto root =
+        std::ranges::find(buffers, BufferType::GuestPageTable, &BufferDefinition::buffer_type);
+    if (root == buffers.end()) {
+        throw std::runtime_error("Native guest page-table resource is missing");
+    }
+    const auto function =
+        OpFunction(U64, spv::FunctionControlMask::MaskNone, TypeFunction(U64, U64));
+    const auto address = OpFunctionParameter(U64);
+    Name(function, "get_guest_page_pointer");
+    const auto entry = AddLabel();
+    const auto root_label = OpLabel();
+    const auto leaf_label = OpLabel();
+    const auto page_label = OpLabel();
+    const auto page_merge = OpLabel();
+    const auto root_merge = OpLabel();
+    const auto merge = OpLabel();
+    const auto address_valid = OpULessThan(U1[1], address, Constant(U64, u64{1} << 40));
+    OpSelectionMerge(merge, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(address_valid, root_label, merge);
+    AddLabel(root_label);
+    const auto root_index =
+        OpUConvert(U32[1], OpShiftRightLogical(U64, address,
+                                               Constant(U64, u64{profile.guest_page_shift} +
+                                                                 profile.guest_page_leaf_bits)));
+    const auto [root_id, root_type] = root->Alias(PointerType::U64);
+    const auto leaf_address =
+        OpLoad(U64, OpAccessChain(root_type, root_id, u32_zero_value, root_index));
+    const auto leaf_valid = OpINotEqual(U1[1], leaf_address, u64_zero_value);
+    OpSelectionMerge(root_merge, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(leaf_valid, leaf_label, root_merge);
+    AddLabel(leaf_label);
+    const auto leaf_index = OpBitwiseAnd(
+        U64, OpShiftRightLogical(U64, address, Constant(U64, u64{profile.guest_page_shift})),
+        Constant(U64, (u64{1} << profile.guest_page_leaf_bits) - 1));
+    const auto leaf_pointer =
+        OpConvertUToPtr(TypePointer(spv::StorageClass::PhysicalStorageBuffer, U64),
+                        OpIAdd(U64, leaf_address, OpIMul(U64, leaf_index, Constant(U64, u64{8}))));
+    const auto page_address = OpLoad(U64, leaf_pointer, spv::MemoryAccessMask::Aligned, 8u);
+    const auto page_valid = OpINotEqual(U1[1], page_address, u64_zero_value);
+    OpSelectionMerge(page_merge, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(page_valid, page_label, page_merge);
+    AddLabel(page_label);
+    const auto result =
+        OpIAdd(U64, page_address,
+               OpBitwiseAnd(U64, address, Constant(U64, (u64{1} << profile.guest_page_shift) - 1)));
+    OpBranch(page_merge);
+    AddLabel(page_merge);
+    const auto page_result = OpPhi(U64, u64_zero_value, leaf_label, result, page_label);
+    OpBranch(root_merge);
+    AddLabel(root_merge);
+    const auto root_result = OpPhi(U64, u64_zero_value, root_label, page_result, page_merge);
+    OpBranch(merge);
+    AddLabel(merge);
+    OpReturnValue(OpPhi(U64, u64_zero_value, entry, root_result, root_merge));
+    OpFunctionEnd();
+    return function;
+}
+
+Id EmitContext::DefineGuestPageLoad(bool coherent, u32 bits) {
+    const auto type = bits == 8 ? U8 : bits == 16 ? U16 : U32[1];
+    const auto pointer_type = TypePointer(spv::StorageClass::PhysicalStorageBuffer, type);
+    const auto zero = bits == 32 ? u32_zero_value : ConstantNull(type);
+    const auto read =
+        OpFunction(type, spv::FunctionControlMask::MaskNone, TypeFunction(type, pointer_type));
+    const auto pointer = OpFunctionParameter(pointer_type);
+    Decorate(pointer, spv::Decoration::AliasedPointer);
+    if (coherent) {
+        Decorate(pointer, spv::Decoration::Coherent);
+    }
+    Name(read, fmt::format("read_guest_page_{}u{}", coherent ? "coherent_" : "", bits));
+    AddLabel();
+    OpReturnValue(OpLoad(type, pointer, spv::MemoryAccessMask::Aligned, bits / 8));
+    OpFunctionEnd();
+    const auto function =
+        OpFunction(type, spv::FunctionControlMask::MaskNone, TypeFunction(type, U64));
+    const auto address = OpFunctionParameter(U64);
+    Name(function, fmt::format("load_guest_page_{}u{}", coherent ? "coherent_" : "", bits));
+    const auto entry = AddLabel();
+    const auto available = OpLabel();
+    const auto merge = OpLabel();
+    const auto gpu_address = OpFunctionCall(U64, guest_page_pointer, address);
+    const auto available_page = OpINotEqual(U1[1], gpu_address, u64_zero_value);
+    OpSelectionMerge(merge, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(available_page, available, merge);
+    AddLabel(available);
+    const auto result = OpFunctionCall(type, read, OpConvertUToPtr(pointer_type, gpu_address));
+    OpBranch(merge);
+    AddLabel(merge);
+    OpReturnValue(OpPhi(type, zero, entry, result, available));
+    OpFunctionEnd();
+    return function;
+}
+
+Id EmitContext::DefineGuestPageStore(bool coherent, u32 bits) {
+    const auto type = bits == 8 ? U8 : bits == 16 ? U16 : U32[1];
+    const auto pointer_type = TypePointer(spv::StorageClass::PhysicalStorageBuffer, type);
+    const auto write = OpFunction(TypeVoid(), spv::FunctionControlMask::MaskNone,
+                                  TypeFunction(TypeVoid(), pointer_type, type));
+    const auto pointer = OpFunctionParameter(pointer_type);
+    const auto value = OpFunctionParameter(type);
+    Decorate(pointer, spv::Decoration::AliasedPointer);
+    if (coherent) {
+        Decorate(pointer, spv::Decoration::Coherent);
+    }
+    Name(write, fmt::format("write_guest_page_{}u{}", coherent ? "coherent_" : "", bits));
+    AddLabel();
+    OpStore(pointer, value, spv::MemoryAccessMask::Aligned, bits / 8);
+    OpReturn();
+    OpFunctionEnd();
+    const auto function = OpFunction(TypeVoid(), spv::FunctionControlMask::MaskNone,
+                                     TypeFunction(TypeVoid(), U64, type));
+    const auto address = OpFunctionParameter(U64);
+    const auto data = OpFunctionParameter(type);
+    Name(function, fmt::format("store_guest_page_{}u{}", coherent ? "coherent_" : "", bits));
+    AddLabel();
+    const auto available = OpLabel();
+    const auto merge = OpLabel();
+    const auto gpu_address = OpFunctionCall(U64, guest_page_pointer, address);
+    const auto valid = OpINotEqual(U1[1], gpu_address, u64_zero_value);
+    OpSelectionMerge(merge, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(valid, available, merge);
+    AddLabel(available);
+    OpFunctionCall(TypeVoid(), write, OpConvertUToPtr(pointer_type, gpu_address), data);
+    OpBranch(merge);
+    AddLabel(merge);
+    OpReturn();
+    OpFunctionEnd();
+    return function;
+}
+
+Id EmitContext::EmitGuestPageAtomic(IR::Opcode opcode, u32 handle, Id address, Id value,
+                                    Id compare) {
+    const bool coherent = info.buffers.at(handle).GetSharp(info).mtype == 3;
+    const auto it = guest_page_atomics.find(opcode);
+    if (!profile.guest_page_shift || it == guest_page_atomics.end() ||
+        !Sirit::ValidId(it->second[coherent])) {
+        throw std::runtime_error("Guest page atomic requires native page-table lowering");
+    }
+    return OpFunctionCall(U32[1], it->second[coherent], address, value, compare);
+}
+
 void EmitContext::DefineFunctions() {
+    if (info.uses_guest_page_reads) {
+        guest_page_pointer = DefineGuestPagePointer();
+        guest_page_load = DefineGuestPageLoad(false);
+        guest_page_load_coherent = DefineGuestPageLoad(true);
+        guest_page_store = DefineGuestPageStore(false);
+        guest_page_store_coherent = DefineGuestPageStore(true);
+        for (u32 index = 0; index < guest_page_load_subword.size(); ++index) {
+            const auto type = index == 0 ? IR::Type::U8 : IR::Type::U16;
+            const bool used = std::ranges::any_of(info.buffers, [type](const auto& buffer) {
+                return buffer.buffer_type == BufferType::Guest && True(buffer.used_types & type);
+            });
+            if (!used) {
+                continue;
+            }
+            for (u32 coherent = 0; coherent < 2; ++coherent) {
+                guest_page_load_subword[index][coherent] =
+                    DefineGuestPageLoad(coherent != 0, 8u << index);
+                guest_page_store_subword[index][coherent] =
+                    DefineGuestPageStore(coherent != 0, 8u << index);
+            }
+        }
+        for (const auto& [opcode, modes] : info.guest_page_atomics) {
+            auto& functions = guest_page_atomics[opcode];
+            for (u32 coherent = 0; coherent < functions.size(); ++coherent) {
+                if (modes & (1u << coherent)) {
+                    functions[coherent] = DefineGuestPageAtomic(opcode, coherent != 0);
+                }
+            }
+        }
+    }
     if (info.uses_pack_10_11_11) {
         f32_to_uf11 = DefineFloat32ToUfloatM5(6, "f32_to_uf11");
         f32_to_uf10 = DefineFloat32ToUfloatM5(5, "f32_to_uf10");

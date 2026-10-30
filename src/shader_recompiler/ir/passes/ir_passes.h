@@ -24,11 +24,13 @@ void LowerHardwareIntrinsics(IR::Program& program);
 void LowerPhisToRegsPass(IR::Program& program);
 void DeadCodeEliminationPass(IR::Program& program);
 void ConstantPropagationPass(IR::BlockList& program);
-void FlattenExtendedUserdataPass(IR::Program& program);
+void FlattenExtendedUserdataPass(IR::Program& program, const ResourceDiscoveryList& resources);
 void ReadLaneEliminationPass(IR::Program& program);
 ResourceDiscoveryList ResourceDiscoverPass(IR::Program& program, const Profile& profile);
 void ResourcePatchingPass(Shader::Info& info, const ResourceDiscoveryList& sharp_usages,
-                          const Profile& profile);
+                          const Profile& profile, bool (*patch_buffer)(IR::Inst&, Info&) = nullptr,
+                          ImageReadConverter convert_image_read = nullptr,
+                          ImageSampleConverter convert_image_sample = nullptr);
 void CollectShaderInfoPass(IR::Program& program, const Profile& profile);
 void LowerBufferFormatToRaw(IR::Program& program);
 void LowerUserClipPlanes(IR::Program& program, const RuntimeInfo& runtime_info);
@@ -39,6 +41,7 @@ void HullShaderTransform(IR::Program& program, const RuntimeInfo& runtime_info);
 void DomainShaderTransform(const IR::Program& program, const RuntimeInfo& runtime_info);
 void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_info,
                              const Profile& profile);
+bool IsSharedMemoryInstruction(const IR::Inst& inst);
 void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile);
 void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_info,
                                const Profile& profile);

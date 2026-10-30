@@ -8,11 +8,26 @@
 #include "shader_recompiler/ir/opcodes.h"
 #include "shader_recompiler/ir/value.h"
 
+namespace AmdGpu {
+enum class DataFormat : u32;
+struct Image;
+} // namespace AmdGpu
+
 namespace Shader {
 enum class SharpFetchPostOp : u8;
-}
+namespace IR {
+class IREmitter;
+union TextureInstInfo;
+} // namespace IR
+using ImageReadConverter = IR::Value (*)(IR::IREmitter&, const IR::Value&, const AmdGpu::Image&,
+                                         bool);
+using ImageSampleConverter = IR::Value (*)(IR::IREmitter&, const IR::Value&, const AmdGpu::Image&,
+                                           const IR::TextureInstInfo&);
+} // namespace Shader
 
 namespace Shader::Optimization {
+
+u32 GetBufferAddressShift(const IR::Inst& inst, AmdGpu::DataFormat data_format);
 
 union PostOpData {
     u32 dw1_mask;
@@ -53,7 +68,24 @@ inline bool IsBufferAtomic(const IR::Inst& inst) {
     case IR::Opcode::BufferAtomicOr32:
     case IR::Opcode::BufferAtomicXor32:
     case IR::Opcode::BufferAtomicSwap32:
+    case IR::Opcode::BufferAtomicRSub32:
+    case IR::Opcode::BufferAtomicMaskOr32:
+    case IR::Opcode::BufferAtomicWrap32:
+    case IR::Opcode::BufferAtomicFCmpSwapRaw32:
     case IR::Opcode::BufferAtomicCmpSwap32:
+    case IR::Opcode::BufferAtomicISub64:
+    case IR::Opcode::BufferAtomicAnd64:
+    case IR::Opcode::BufferAtomicOr64:
+    case IR::Opcode::BufferAtomicXor64:
+    case IR::Opcode::BufferAtomicSwap64:
+    case IR::Opcode::BufferAtomicSrc2_32:
+    case IR::Opcode::BufferAtomicSrc2_64:
+    case IR::Opcode::BufferAtomicRSub64:
+    case IR::Opcode::BufferAtomicMaskOr64:
+    case IR::Opcode::BufferAtomicInc64:
+    case IR::Opcode::BufferAtomicDec64:
+    case IR::Opcode::BufferAtomicFCmpSwapRaw64:
+    case IR::Opcode::BufferAtomicCmpSwap64:
     case IR::Opcode::BufferAtomicFCmpSwap32:
         return true;
     default:
@@ -114,7 +146,20 @@ inline bool IsDataRingInstruction(const IR::Inst& inst) {
     case IR::Opcode::SharedAtomicInc64:
     case IR::Opcode::SharedAtomicDec32:
     case IR::Opcode::SharedAtomicDec64:
+    case IR::Opcode::SharedAtomicRSub32:
+    case IR::Opcode::SharedAtomicMaskOr32:
+    case IR::Opcode::SharedAtomicWrap32:
+    case IR::Opcode::SharedAtomicExchange32:
+    case IR::Opcode::SharedAtomicFCmpSwap32:
     case IR::Opcode::SharedAtomicCmpSwap32:
+    case IR::Opcode::SharedAtomicRSub64:
+    case IR::Opcode::SharedAtomicMaskOr64:
+    case IR::Opcode::SharedAtomicExchange64:
+    case IR::Opcode::SharedAtomicSrc2_32:
+    case IR::Opcode::SharedAtomicSrc2_64:
+    case IR::Opcode::SharedAtomicIncBound64:
+    case IR::Opcode::SharedAtomicDecBound64:
+    case IR::Opcode::SharedAtomicFCmpSwap64:
     case IR::Opcode::SharedAtomicCmpSwap64:
         return inst.Flags<bool>(); // is_gds
     default:
@@ -159,6 +204,7 @@ inline bool IsImageAtomicInstruction(const IR::Inst& inst) {
     case IR::Opcode::ImageAtomicXor32:
     case IR::Opcode::ImageAtomicExchange32:
     case IR::Opcode::ImageAtomicCmpSwap32:
+    case IR::Opcode::ImageAtomicFCmpSwap32:
         return true;
     default:
         return false;

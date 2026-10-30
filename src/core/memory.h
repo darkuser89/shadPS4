@@ -5,14 +5,21 @@
 
 #include <map>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 #include "common/enum.h"
 #include "common/shared_first_mutex.h"
 #include "common/singleton.h"
 #include "common/types.h"
 #include "core/address_space.h"
 #include "core/libraries/kernel/memory.h"
+
+namespace VideoCore {
+class Rasterizer;
+}
 
 namespace Vulkan {
 class Rasterizer;
@@ -178,12 +185,17 @@ class MemoryManager {
     using VMAHandle = VMAMap::iterator;
 
 public:
+    struct BackingRange {
+        VAddr address;
+        u64 size;
+        std::optional<PAddr> physical_address;
+    };
+
     explicit MemoryManager();
     ~MemoryManager();
 
-    void SetRasterizer(Vulkan::Rasterizer* rasterizer_) {
-        rasterizer = rasterizer_;
-    }
+    void SetRasterizer(VideoCore::Rasterizer* rasterizer_);
+    void SetRasterizer(Vulkan::Rasterizer* rasterizer_);
 
     AddressSpace& GetAddressSpace() {
         return impl;
@@ -254,6 +266,13 @@ public:
 
     void CopySparseMemory(VAddr source, u8* dest, u64 size);
 
+    void ReadSparseMemory(VAddr source, std::span<u8> destination);
+    bool TryWriteSparseMemory(VAddr destination, std::span<const u8> source);
+    bool ReadModuleMemory(VAddr source, std::span<u8> destination);
+    void WriteModuleMemory(VAddr destination, std::span<const u8> source);
+
+    [[nodiscard]] std::vector<BackingRange> GetBackingRanges(VAddr address, u64 size);
+
     bool TryWriteBacking(void* address, const void* data, u64 size);
 
     void SetupMemoryRegions(u64 flexible_size, bool use_extended_mem1, bool use_extended_mem2);
@@ -317,7 +336,7 @@ private:
         return std::prev(fmem_map.upper_bound(target));
     }
 
-    bool HasPhysicalBacking(VirtualMemoryArea vma) {
+    bool HasPhysicalBacking(const VirtualMemoryArea& vma) {
         return vma.type == VMAType::Direct || vma.type == VMAType::Flexible ||
                vma.type == VMAType::Pooled;
     }
@@ -355,7 +374,8 @@ private:
     u64 flexible_usage{};
     u64 pool_budget{};
     s32 sdk_version{};
-    Vulkan::Rasterizer* rasterizer{};
+    VideoCore::Rasterizer* rasterizer{};
+    std::unique_ptr<VideoCore::Rasterizer> rasterizer_adapter;
 
     struct PrtArea {
         VAddr start;

@@ -3,6 +3,7 @@
 
 #include <mutex>
 #include <span>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -15,6 +16,8 @@
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/frontend/translate/translate.h"
 #include "shader_recompiler/ir/basic_block.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
+#include "shader_recompiler/ir/passes/resource_pass.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/runtime_info.h"
 
@@ -120,7 +123,7 @@ void Invoke(EmitContext& ctx, IR::Inst* inst) {
     }
 }
 
-void EmitInst(EmitContext& ctx, IR::Inst* inst) {
+void EmitInstUnconditionally(EmitContext& ctx, IR::Inst* inst) {
     switch (inst->GetOpcode()) {
 #define OPCODE(name, result_type, ...)                                                             \
     case IR::Opcode::name:                                                                         \
@@ -135,6 +138,10 @@ Id TypeId(const EmitContext& ctx, IR::Type type) {
     switch (type) {
     case IR::Type::U1:
         return ctx.U1[1];
+    case IR::Type::U8:
+        return ctx.U8;
+    case IR::Type::U16:
+        return ctx.U16;
     case IR::Type::U32:
         return ctx.U32[1];
     case IR::Type::U32x2:
@@ -145,10 +152,52 @@ Id TypeId(const EmitContext& ctx, IR::Type type) {
         return ctx.U32[4];
     case IR::Type::F32:
         return ctx.F32[1];
+    case IR::Type::F32x2:
+        return ctx.F32[2];
+    case IR::Type::F32x3:
+        return ctx.F32[3];
+    case IR::Type::F32x4:
+        return ctx.F32[4];
     case IR::Type::U64:
         return ctx.U64;
     default:
         UNREACHABLE_MSG("Phi node type {}", type);
+    }
+}
+
+void EmitInst(EmitContext& ctx, IR::Inst* inst) {
+    const auto* address =
+        Optimization::IsBufferInstruction(*inst) ? inst->Arg(1).TryInst() : nullptr;
+    Id predicate{};
+    if (Sirit::ValidId(ctx.memory_predicate) &&
+        (Optimization::IsBufferInstruction(*inst) || Optimization::IsImageInstruction(*inst) ||
+         Optimization::IsSharedMemoryInstruction(*inst) ||
+         inst->GetOpcode() == IR::Opcode::DataAppend ||
+         inst->GetOpcode() == IR::Opcode::DataConsume)) {
+        predicate = ctx.memory_predicate;
+    }
+    if (address && address->GetOpcode() == IR::Opcode::GuardBufferAddress) {
+        const Id bounds = ctx.Def(address->Arg(1));
+        predicate =
+            Sirit::ValidId(predicate) ? ctx.OpLogicalAnd(ctx.U1[1], predicate, bounds) : bounds;
+    }
+    if (!Sirit::ValidId(predicate)) {
+        return EmitInstUnconditionally(ctx, inst);
+    }
+    const Id previous_label = ctx.last_label;
+    const Id access_label = ctx.OpLabel();
+    const Id merge_label = ctx.OpLabel();
+    ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(predicate, access_label, merge_label);
+    ctx.AddLabel(access_label);
+    EmitInstUnconditionally(ctx, inst);
+    const Id result_label = ctx.last_label;
+    ctx.OpBranch(merge_label);
+    ctx.AddLabel(merge_label);
+    if (inst->Type() != IR::Type::Void) {
+        const Id type = TypeId(ctx, inst->Type());
+        inst->SetDefinition<Id>(ctx.OpPhi(type, inst->Definition<Id>(), result_label,
+                                          ctx.ConstantNull(type), previous_label));
     }
 }
 
@@ -165,6 +214,9 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
             ctx.AddLabel(label);
             for (IR::Inst& inst : node.data.block->Instructions()) {
                 EmitInst(ctx, &inst);
+            }
+            if (Sirit::ValidId(ctx.memory_predicate)) {
+                throw std::runtime_error("Predicated memory access crosses an IR block");
             }
             ctx.first_to_last_label_map[label.value] = ctx.last_label;
             break;
@@ -363,7 +415,7 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     } else if (stage == SwStage::Geometry && info.stores.GetAny(IR::Attribute::ViewportIndex)) {
         ctx.AddCapability(spv::Capability::MultiViewport);
     }
-    if (info.uses_dma) {
+    if (info.uses_dma || info.uses_guest_page_reads) {
         ctx.AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
         ctx.AddExtension("SPV_KHR_physical_storage_buffer");
     }

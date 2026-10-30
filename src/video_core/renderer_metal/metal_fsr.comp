@@ -1,0 +1,140 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(push_constant) uniform Constants {
+    uvec4 con0;
+    uvec4 con1;
+    uvec4 con2;
+    uvec4 con3;
+    uvec4 control;
+};
+
+#define A_GPU 1
+#define A_GLSL 1
+#define A_HALF
+#include "video_core/host_shaders/fsr/ffx_a.h"
+
+layout(set = 0, binding = 0) uniform texture2D source_image;
+#if FSR_FULL_PRECISION
+layout(set = 0, binding = 1, rgba32f) uniform writeonly image2D output_image;
+#else
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D output_image;
+#endif
+layout(set = 0, binding = 2) uniform sampler source_sampler;
+
+vec4 Perceptual(vec4 value) {
+    value = clamp(value, 0.0, 1.0);
+    if (control.y != 0) {
+        return value;
+    }
+    return mix(12.92 * value, 1.055 * pow(value, vec4(1.0 / 2.4)) - 0.055,
+               greaterThan(value, vec4(0.0031308)));
+}
+
+#if FSR_EASU
+#if FSR_FULL_PRECISION
+#define FSR_EASU_F 1
+vec4 GatherHdr(vec2 p, int component) {
+    ivec2 size = textureSize(sampler2D(source_image, source_sampler), 0);
+    ivec2 base = ivec2(floor(p * vec2(size) - 0.5));
+    return vec4(
+        texelFetch(sampler2D(source_image, source_sampler),
+                   clamp(base + ivec2(0, 1), ivec2(0), size - 1), 0)[component],
+        texelFetch(sampler2D(source_image, source_sampler),
+                   clamp(base + ivec2(1, 1), ivec2(0), size - 1), 0)[component],
+        texelFetch(sampler2D(source_image, source_sampler),
+                   clamp(base + ivec2(1, 0), ivec2(0), size - 1), 0)[component],
+        texelFetch(sampler2D(source_image, source_sampler),
+                   clamp(base, ivec2(0), size - 1), 0)[component]);
+}
+AF4 FsrEasuRF(AF2 p) {
+    return Perceptual(GatherHdr(p, 0));
+}
+AF4 FsrEasuGF(AF2 p) {
+    return Perceptual(GatherHdr(p, 1));
+}
+AF4 FsrEasuBF(AF2 p) {
+    return Perceptual(GatherHdr(p, 2));
+}
+#else
+#define FSR_EASU_H 1
+AH4 FsrEasuRH(AF2 p) {
+    return AH4(Perceptual(textureGather(sampler2D(source_image, source_sampler), p, 0)));
+}
+AH4 FsrEasuGH(AF2 p) {
+    return AH4(Perceptual(textureGather(sampler2D(source_image, source_sampler), p, 1)));
+}
+AH4 FsrEasuBH(AF2 p) {
+    return AH4(Perceptual(textureGather(sampler2D(source_image, source_sampler), p, 2)));
+}
+#endif
+#else
+#if FSR_FULL_PRECISION
+#define FSR_RCAS_F 1
+AF4 FsrRcasLoadF(ASU2 p) {
+    ivec2 size = textureSize(sampler2D(source_image, source_sampler), 0);
+    return texelFetch(sampler2D(source_image, source_sampler),
+                      clamp(ivec2(p), ivec2(0), size - 1), 0);
+}
+void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
+#else
+#define FSR_RCAS_H 1
+AH4 FsrRcasLoadH(ASW2 p) {
+    ivec2 size = textureSize(sampler2D(source_image, source_sampler), 0);
+    return AH4(texelFetch(sampler2D(source_image, source_sampler),
+                          clamp(ivec2(p), ivec2(0), size - 1), 0));
+}
+void FsrRcasInputH(inout AH1 r, inout AH1 g, inout AH1 b) {}
+#endif
+#endif
+
+#if FSR_FULL_PRECISION && !FSR_EASU
+float HdrReciprocal(float value) {
+    return value == 0.0 ? 0.0 : 1.0 / value;
+}
+#define APrxMedRcpF1 HdrReciprocal
+#endif
+
+#include "video_core/host_shaders/fsr/ffx_fsr1.h"
+
+void Filter(uvec2 position) {
+    if (any(greaterThanEqual(position, uvec2(imageSize(output_image))))) {
+        return;
+    }
+#if FSR_FULL_PRECISION
+    AF3 color;
+#if FSR_EASU
+    FsrEasuF(color, position, con0, con1, con2, con3);
+#else
+    FsrRcasF(color.r, color.g, color.b, position, con0);
+#endif
+#else
+    AH3 color;
+#if FSR_EASU
+    FsrEasuH(color, position, con0, con1, con2, con3);
+#else
+    FsrRcasH(color.r, color.g, color.b, position, con0);
+#endif
+#endif
+    vec3 result = clamp(vec3(color), 0.0, 1.0);
+    if (control.x != 0) {
+        result = mix(result / 12.92, pow((result + 0.055) / 1.055, vec3(2.4)),
+                     greaterThan(result, vec3(0.04045)));
+    }
+    imageStore(output_image, ivec2(position), vec4(result, 1));
+}
+
+layout(local_size_x = 64) in;
+void main() {
+    uvec2 position = ARmp8x8(gl_LocalInvocationID.x) + (gl_WorkGroupID.xy << 4u);
+    Filter(position);
+    position.x += 8u;
+    Filter(position);
+    position.y += 8u;
+    Filter(position);
+    position.x -= 8u;
+    Filter(position);
+}

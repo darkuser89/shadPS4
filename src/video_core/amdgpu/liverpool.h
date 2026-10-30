@@ -6,10 +6,12 @@
 #include <condition_variable>
 #include <coroutine>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <semaphore>
 #include <span>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <queue>
 
@@ -19,6 +21,10 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/regs.h"
+
+namespace VideoCore {
+class Rasterizer;
+}
 
 namespace Vulkan {
 class Rasterizer;
@@ -70,13 +76,17 @@ public:
 
     void SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb);
     void SubmitAsc(u32 gnm_vqid, std::span<const u32> acb);
+    void StopSubmissions();
 
     void SubmitDone() noexcept {
         std::scoped_lock lk{submit_mutex};
+        if (submissions_stopped) {
+            return;
+        }
         mapped_queues[GfxQueueId].ccb_buffer_offset = 0;
         mapped_queues[GfxQueueId].dcb_buffer_offset = 0;
         submit_done = true;
-        submit_cv.notify_one();
+        NotifyWork();
     }
 
     void WaitGpuIdle() noexcept {
@@ -88,13 +98,12 @@ public:
         return num_submits == 0;
     }
 
-    void SetVoPort(Libraries::VideoOut::VideoOutPort* port) {
-        vo_port = port;
-    }
+    void DrainCommands();
 
-    void BindRasterizer(Vulkan::Rasterizer* rasterizer_) {
-        rasterizer = rasterizer_;
-    }
+    void SetVoPort(std::shared_ptr<Libraries::VideoOut::VideoOutPort> port);
+
+    void BindRasterizer(VideoCore::Rasterizer* rasterizer_);
+    void BindRasterizer(Vulkan::Rasterizer* rasterizer_);
 
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
@@ -107,14 +116,14 @@ public:
                     sem.release();
                 });
                 ++num_commands;
-                submit_cv.notify_one();
+                NotifyWork();
             }
             sem.acquire();
         } else {
             std::scoped_lock lk{submit_mutex};
             command_queue.emplace(std::move(func));
             ++num_commands;
-            submit_cv.notify_one();
+            NotifyWork();
         }
     }
 
@@ -131,13 +140,13 @@ public:
     }
 
     struct AscQueueInfo {
-        static constexpr size_t Pm4BufferSize = 1024;
         VAddr map_addr;
         u32* read_addr;
         u32 ring_size_dw;
         u32 pipe_id;
-        std::array<u32, Pm4BufferSize> tmp_packet;
+        std::vector<u32> tmp_packet;
         u32 tmp_dwords;
+        u32 next_offs_dw{};
     };
     Common::SlotVector<AscQueueInfo> asc_queues{64};
 
@@ -153,6 +162,24 @@ public:
 
 private:
     struct Task {
+        Task() = default;
+        Task(const Task&) = delete;
+        Task& operator=(const Task&) = delete;
+        Task(Task&& other) noexcept : handle{std::exchange(other.handle, {})} {}
+        Task& operator=(Task&& other) noexcept {
+            if (this != &other) {
+                if (handle) {
+                    handle.destroy();
+                }
+                handle = std::exchange(other.handle, {});
+            }
+            return *this;
+        }
+        ~Task() {
+            if (handle) {
+                handle.destroy();
+            }
+        }
         struct promise_type {
             auto get_return_object() {
                 Task task{};
@@ -181,7 +208,7 @@ private:
         };
 
         using Handle = std::coroutine_handle<promise_type>;
-        Handle handle;
+        Handle handle{};
     };
 
     using CmdBuffer = std::pair<std::span<const u32>, std::span<const u32>>;
@@ -192,6 +219,9 @@ private:
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
 
     void ProcessCommands();
+    std::shared_ptr<Libraries::VideoOut::VideoOutPort> GetVoPort();
+    void NotifyWork();
+    bool CanSleepOnVoLabel();
     void Process(std::stop_token stoken);
 
     struct GpuQueue {
@@ -228,13 +258,15 @@ private:
         static std::array<u8, 48_KB> constants_heap;
     } cblock{};
 
-    Vulkan::Rasterizer* rasterizer{};
-    Libraries::VideoOut::VideoOutPort* vo_port{};
+    VideoCore::Rasterizer* rasterizer{};
+    std::unique_ptr<VideoCore::Rasterizer> rasterizer_adapter;
+    std::shared_ptr<Libraries::VideoOut::VideoOutPort> vo_port;
     const bool guest_markers_enabled;
     std::jthread process_thread{};
     std::atomic<u32> num_submits{};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
+    std::atomic<bool> submissions_stopped{};
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
@@ -243,6 +275,7 @@ private:
     u32 gpu_tid;
 #endif
     s32 curr_qid{-1};
+    std::atomic<bool> waiting_on_vo_label{};
 };
 
 } // namespace AmdGpu

@@ -15,6 +15,9 @@
 
 namespace ImGuiEmuSettings {
 
+using SettingsTexture =
+    std::variant<ImGui::Core::TextureManager::NativeTexture, ImGui::RefCountedTexture>;
+
 class SettingsWindow {
 
 public:
@@ -47,8 +50,7 @@ private:
     void DrawProfileSelector();
     void DrawGameFolderManager();
     void DrawCategoryTabs();
-    void AddCategory(std::string name, std::variant<SDL_Texture*, ImGui::RefCountedTexture> texture,
-                     SettingsCategory category);
+    void AddCategory(std::string name, SettingsTexture texture, SettingsCategory category);
 
     void AddSettingCheckbox(std::string name, bool& value);
     void AddSettingSliderInt(std::string name, int& value, int min, int max);
@@ -68,14 +70,14 @@ private:
     bool closeOnSave = false;
     int deleteProfileIndex = -1;
 
-    std::variant<SDL_Texture*, ImGui::RefCountedTexture> profilesTexture;
-    std::variant<SDL_Texture*, ImGui::RefCountedTexture> generalTexture;
-    std::variant<SDL_Texture*, ImGui::RefCountedTexture> experimentalTexture;
-    std::variant<SDL_Texture*, ImGui::RefCountedTexture> graphicsTexture;
-    std::variant<SDL_Texture*, ImGui::RefCountedTexture> inputTexture;
-    std::variant<SDL_Texture*, ImGui::RefCountedTexture> trophyTexture;
-    std::variant<SDL_Texture*, ImGui::RefCountedTexture> logTexture;
-    std::variant<SDL_Texture*, ImGui::RefCountedTexture> foldersTexture;
+    SettingsTexture profilesTexture;
+    SettingsTexture generalTexture;
+    SettingsTexture experimentalTexture;
+    SettingsTexture graphicsTexture;
+    SettingsTexture inputTexture;
+    SettingsTexture trophyTexture;
+    SettingsTexture logTexture;
+    SettingsTexture foldersTexture;
 
     //////////////////// options for comboboxes
     const std::map<std::string, int> languageMap = {{"Arabic", 21},
@@ -114,6 +116,11 @@ private:
                                                             "Fullscreen (Borderless)"};
     const std::vector<std::string> audioBackendOptions = {"SDL", "OpenAL"};
     const std::vector<std::string> presentModeOptions = {"Mailbox", "Fifo", "Immediate"};
+#ifdef __APPLE__
+    const std::vector<std::string> rendererOptions = {"Metal4", "Vulkan"};
+#else
+    const std::vector<std::string> rendererOptions = {"Vulkan"};
+#endif
     const std::vector<std::string> hideCursorOptions = {"Never", "Idle", "Always"};
     const std::vector<std::string> trophySideOptions = {"left", "right", "top", "bottom"};
     const std::vector<std::string> readbacksModeOptions = {"Disabled", "Relaxed", "Precise"};
@@ -130,10 +137,12 @@ private:
     // Graphics tab
     int fullscreenModeSetting;
     int presentModeSetting;
+    int rendererSetting;
     int windowWidthSetting;
     int windowHeightSetting;
     bool hdrAllowedSetting;
     bool fsrEnabledSetting;
+    bool metalFxEnabledSetting;
     bool rcasEnabledSetting;
     float rcasAttenuationSetting;
 

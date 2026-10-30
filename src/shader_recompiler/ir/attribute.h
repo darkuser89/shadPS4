@@ -95,6 +95,16 @@ enum class Attribute : u64 {
     BaseVertex = 98,
     BaseInstance = 99,
     IsHelperInvocation = 100,
+    GeometryVertexOffset = 101,
+    GeometryRingOffset = 102,
+    GeometryWaveId = 103,
+    GeometryCopyScalar = 104,
+    GeometryCopyVector = 105,
+    GeometryExportScalar = 106,
+    GeometryExportVector = 107,
+    GeometryInitialActiveCount = 108,
+    GeometryCopyActive = 109,
+    GeometryInputActive = 110,
     Max,
 };
 

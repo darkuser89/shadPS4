@@ -8,10 +8,11 @@
 #include "core/libraries/videoout/video_out.h"
 
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <queue>
 
-namespace Vulkan {
+namespace VideoCore {
 struct Frame;
 }
 
@@ -50,9 +51,16 @@ struct VideoOutPort {
         return address >= start && address <= end;
     }
 
-    void WaitVoLabel(auto&& pred) {
+    bool WaitVoLabel(auto&& pred) {
         std::unique_lock lk{vo_mutex};
-        vo_cv.wait(lk, pred);
+        vo_cv.wait(lk, [&] { return label_waits_cancelled || pred(); });
+        return !label_waits_cancelled;
+    }
+
+    void CancelLabelWaits() {
+        std::scoped_lock lk{vo_mutex};
+        label_waits_cancelled = true;
+        vo_cv.notify_all();
     }
 
     void SignalVoLabel() {
@@ -64,6 +72,8 @@ struct VideoOutPort {
         return std::count_if(buffer_slots.cbegin(), buffer_slots.cend(),
                              [](auto& buffer) { return buffer.group_index != -1; });
     }
+
+    bool label_waits_cancelled{};
 };
 
 struct ServiceThreadParams {
@@ -78,6 +88,8 @@ class VideoOutDriver {
 public:
     VideoOutDriver(u32 width, u32 height);
     ~VideoOutDriver();
+
+    void Stop();
 
     int Open(const ServiceThreadParams* params);
     void Close(s32 handle);
@@ -94,8 +106,8 @@ public:
 
 private:
     struct Request {
-        Vulkan::Frame* frame;
-        VideoOutPort* port;
+        VideoCore::Frame* frame;
+        std::shared_ptr<VideoOutPort> port;
         s64 flip_arg;
         s32 index;
         bool eop;
@@ -105,16 +117,26 @@ private:
         }
     };
 
+    struct FlipQueue {
+        std::mutex mutex;
+        std::queue<Request> requests;
+        bool stopping{};
+    };
+
     void Flip(const Request& req);
     void DrawBlankFrame(); // Video port out not open
     void DrawLastFrame();  // Used when there is no flip request
-    void SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
+    static void SubmitFlipInternal(const std::shared_ptr<FlipQueue>& queue,
+                                   const std::shared_ptr<VideoOutPort>& port, s32 index,
+                                   s64 flip_arg, bool is_eop);
     void PresentThread(std::stop_token token);
 
-    std::mutex mutex;
-    VideoOutPort main_port{};
+    std::shared_ptr<FlipQueue> flip_queue{std::make_shared<FlipQueue>()};
+    std::mutex join_mutex;
+    std::shared_ptr<VideoOutPort> main_port{std::make_shared<VideoOutPort>()};
+    std::thread::id present_thread_id;
+    std::stop_source present_stop_source{std::nostopstate};
     std::jthread present_thread;
-    std::queue<Request> requests;
 };
 
 } // namespace Libraries::VideoOut

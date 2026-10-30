@@ -1,19 +1,39 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <shared_mutex>
+#include <stdexcept>
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
+#include "common/small_vector.h"
 #include "core/emulator_settings.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/memory.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/process.h"
 #include "core/memory.h"
-#include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/rasterizer.h"
+#include "video_core/renderer_compat.h"
+
+#ifdef __APPLE__
+#include "video_core/renderer_metal/metal_guest_write_alias.h"
+#endif
 
 namespace Core {
+
+namespace {
+
+auto GuardMemoryOperation(VideoCore::Rasterizer* rasterizer) {
+    return VideoCore::GuardMemoryOperation([rasterizer] {
+        if (rasterizer) {
+            rasterizer->OnMemoryOperationException();
+        }
+    });
+}
+
+} // namespace
 
 MemoryManager::MemoryManager() {
     LOG_INFO(Kernel_Vmm, "Virtual memory space initialized with regions:");
@@ -52,8 +72,19 @@ MemoryManager::MemoryManager() {
 
 MemoryManager::~MemoryManager() = default;
 
+void MemoryManager::SetRasterizer(VideoCore::Rasterizer* rasterizer_) {
+    rasterizer_adapter.reset();
+    rasterizer = rasterizer_;
+}
+
+void MemoryManager::SetRasterizer(Vulkan::Rasterizer* rasterizer_) {
+    rasterizer_adapter = VideoCore::AdaptRasterizer(rasterizer_);
+    rasterizer = rasterizer_adapter.get();
+}
+
 void MemoryManager::SetupMemoryRegions(u64 flexible_size, bool use_extended_mem1,
                                        bool use_extended_mem2) {
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
     // Calculate actual direct and flexible memory sizes
     const bool is_neo = ::Libraries::Kernel::sceKernelIsNeoMode();
     auto total_size = is_neo ? ORBIS_KERNEL_TOTAL_MEM_PRO : ORBIS_KERNEL_TOTAL_MEM;
@@ -130,6 +161,11 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
 }
 
 void MemoryManager::SetPrtArea(u32 id, VAddr address, u64 size) {
+    if (rasterizer && rasterizer->RequiresMemoryMappingDispatch()) {
+        rasterizer->DispatchMemoryMapping([&] { SetPrtArea(id, address, size); });
+        return;
+    }
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
     PrtArea& area = prt_areas[id];
     if (area.mapped) {
         rasterizer->UnmapMemory(area.start, area.end - area.start);
@@ -149,7 +185,27 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
     while (size) {
         const u64 page = virtual_addr >> 14;
         const u64 offset_in_page = virtual_addr % 16_KB;
-        const u64 copy_size = std::min<u64>(16_KB - offset_in_page, size);
+        u64 copy_size = std::min<u64>(16_KB - offset_in_page, size);
+#ifdef __APPLE__
+        if (EmulatorSettings.GetRenderer() == "Metal4") {
+            auto vma = vma_map.upper_bound(virtual_addr);
+            if (vma != vma_map.begin()) {
+                --vma;
+                const auto& area = vma->second;
+                if (area.Contains(virtual_addr, 1)) {
+                    copy_size = std::min(copy_size, area.base + area.size - virtual_addr);
+                    if (area.type == VMAType::Code) {
+                        const Metal::GuestWriteAlias alias{virtual_addr, copy_size};
+                        std::memcpy(dest, alias.Data(), copy_size);
+                        size -= copy_size;
+                        virtual_addr += copy_size;
+                        dest += copy_size;
+                        continue;
+                    }
+                }
+            }
+        }
+#endif
         if (auto* entry = backing_pages.find(page); entry && *entry) {
             std::memcpy(dest, *entry + offset_in_page, copy_size);
         } else {
@@ -159,6 +215,331 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
         virtual_addr += copy_size;
         dest += copy_size;
     }
+}
+
+void MemoryManager::ReadSparseMemory(VAddr source, std::span<u8> destination) {
+    constexpr u64 AddressSpaceSize = u64{1} << AddressSpace::Traits::ADDRESS_SPACE_BITS;
+    if (source >= AddressSpaceSize || destination.size() > AddressSpaceSize - source) {
+        throw std::invalid_argument("Invalid guest sparse read range");
+    }
+    if (destination.empty()) {
+        return;
+    }
+    std::shared_lock lock{mutex};
+    CopySparseMemory(source, destination.data(), destination.size());
+}
+
+bool MemoryManager::TryWriteSparseMemory(VAddr destination, std::span<const u8> source) {
+    constexpr u64 PageSize = u64{1} << AddressSpace::Traits::PAGE_BITS;
+    constexpr u64 AddressSpaceSize = u64{1} << AddressSpace::Traits::ADDRESS_SPACE_BITS;
+    if (destination >= AddressSpaceSize || source.size() > AddressSpaceSize - destination) {
+        throw std::invalid_argument("Invalid guest sparse write range");
+    }
+    if (source.empty()) {
+        return true;
+    }
+    std::shared_lock lock{mutex};
+    const auto& pages = impl.BackingPages();
+#ifdef __APPLE__
+    if (EmulatorSettings.GetRenderer() == "Metal4") {
+        struct WriteRange {
+            u8* destination;
+            u64 size;
+            std::unique_ptr<Metal::GuestWriteAlias> alias;
+        };
+        std::vector<WriteRange> ranges;
+        VAddr current = destination;
+        u64 remaining = source.size();
+        auto vma = vma_map.upper_bound(current);
+        if (vma == vma_map.begin()) {
+            return false;
+        }
+        --vma;
+        while (remaining) {
+            if (vma == vma_map.end() || !vma->second.Contains(current, 1) ||
+                !vma->second.IsMapped()) {
+                return false;
+            }
+            const auto& area = vma->second;
+            const u64 length = std::min(remaining, area.base + area.size - current);
+            if (area.type == VMAType::Code) {
+                auto alias = std::make_unique<Metal::GuestWriteAlias>(current, length);
+                ranges.push_back({alias->Data(), length, std::move(alias)});
+            } else if (HasPhysicalBacking(area)) {
+                u64 count = length;
+                VAddr address = current;
+                while (count) {
+                    const auto* entry = pages.find(address / PageSize);
+                    if (!entry || !*entry) {
+                        return false;
+                    }
+                    const u64 offset = address % PageSize;
+                    const u64 chunk = std::min(count, PageSize - offset);
+                    ranges.push_back({*entry + offset, chunk, nullptr});
+                    address += chunk;
+                    count -= chunk;
+                }
+            } else {
+                return false;
+            }
+            current += length;
+            remaining -= length;
+            ++vma;
+        }
+        for (const auto& range : ranges) {
+            std::memcpy(range.destination, source.data(), range.size);
+            source = source.subspan(range.size);
+        }
+        return true;
+    }
+#endif
+    const u64 first_page = destination / PageSize;
+    const u64 last_page = (destination + source.size() - 1) / PageSize;
+    for (u64 page = first_page; page <= last_page; ++page) {
+        const auto* entry = pages.find(page);
+        if (!entry || !*entry) {
+            return false;
+        }
+    }
+    while (!source.empty()) {
+        const u64 offset = destination % PageSize;
+        const u64 length = std::min<u64>(PageSize - offset, source.size());
+        std::memcpy(*pages.find(destination / PageSize) + offset, source.data(), length);
+        destination += length;
+        source = source.subspan(length);
+    }
+    return true;
+}
+
+bool MemoryManager::ReadModuleMemory(VAddr source, std::span<u8> destination) {
+#ifdef __APPLE__
+    if (EmulatorSettings.GetRenderer() == "Metal4") {
+        if (rasterizer && rasterizer->RequiresMemoryMappingDispatch()) {
+            bool result = false;
+            rasterizer->DispatchMemoryMapping(
+                [&] { result = ReadModuleMemory(source, destination); });
+            return result;
+        }
+        const auto memory_operation = GuardMemoryOperation(rasterizer);
+        constexpr u64 Limit = u64{1} << AddressSpace::Traits::ADDRESS_SPACE_BITS;
+        constexpr u64 PageSize = u64{1} << AddressSpace::Traits::PAGE_BITS;
+        if (source >= Limit || destination.size() > Limit - source) {
+            return false;
+        }
+        if (destination.empty()) {
+            return true;
+        }
+        if (!rasterizer) {
+            throw std::runtime_error("Metal module read requires the native rasterizer");
+        }
+        struct ReadRange {
+            VAddr address;
+            u64 size;
+            std::unique_ptr<Metal::GuestWriteAlias> alias;
+        };
+        std::vector<ReadRange> ranges;
+        {
+            std::shared_lock lock{mutex};
+            auto vma = vma_map.upper_bound(source);
+            if (vma == vma_map.begin()) {
+                return false;
+            }
+            --vma;
+            VAddr current = source;
+            u64 remaining = destination.size();
+            while (remaining) {
+                if (vma == vma_map.end() || !vma->second.Contains(current, 1) ||
+                    !vma->second.IsMapped()) {
+                    return false;
+                }
+                const auto& area = vma->second;
+                const u64 length = std::min(remaining, area.base + area.size - current);
+                if (HasPhysicalBacking(area)) {
+                    const auto& pages = impl.BackingPages();
+                    for (u64 page = current / PageSize; page <= (current + length - 1) / PageSize;
+                         ++page) {
+                        const auto* entry = pages.find(page);
+                        if (!entry || !*entry) {
+                            return false;
+                        }
+                    }
+                    ranges.push_back({current, length, nullptr});
+                } else if (area.type == VMAType::Code) {
+                    ranges.push_back({current, length,
+                                      std::make_unique<Metal::GuestWriteAlias>(current, length)});
+                } else {
+                    return false;
+                }
+                current += length;
+                remaining -= length;
+                ++vma;
+            }
+        }
+        if (!rasterizer->ReadMemory(source, destination.size())) {
+            return false;
+        }
+        for (const auto& range : ranges) {
+            const auto payload = destination.first(range.size);
+            if (range.alias) {
+                std::memcpy(payload.data(), range.alias->Data(), payload.size());
+            } else {
+                ReadSparseMemory(range.address, payload);
+            }
+            destination = destination.subspan(range.size);
+        }
+        return true;
+    }
+#endif
+    std::memcpy(destination.data(), reinterpret_cast<const void*>(source), destination.size());
+    return true;
+}
+
+void MemoryManager::WriteModuleMemory(VAddr destination, std::span<const u8> source) {
+#ifdef __APPLE__
+    if (EmulatorSettings.GetRenderer() == "Metal4") {
+        if (rasterizer && rasterizer->RequiresMemoryMappingDispatch()) {
+            rasterizer->DispatchMemoryMapping([&] { WriteModuleMemory(destination, source); });
+            return;
+        }
+        const auto memory_operation = GuardMemoryOperation(rasterizer);
+        constexpr u64 Limit = u64{1} << AddressSpace::Traits::ADDRESS_SPACE_BITS;
+        constexpr u64 PageSize = u64{1} << AddressSpace::Traits::PAGE_BITS;
+        if (destination >= Limit || source.size() > Limit - destination) {
+            throw std::invalid_argument("Invalid Metal module write range");
+        }
+        if (source.empty()) {
+            return;
+        }
+        if (!rasterizer) {
+            throw std::runtime_error("Metal module write requires the native rasterizer");
+        }
+        struct WriteRange {
+            VAddr address;
+            u64 size;
+            std::unique_ptr<Metal::GuestWriteAlias> alias;
+        };
+        std::vector<WriteRange> ranges;
+        std::vector<std::pair<PAddr, u64>> physical_ranges;
+        std::vector<std::pair<VAddr, u64>> executable_aliases;
+        {
+            std::shared_lock lock{mutex};
+            auto vma = vma_map.upper_bound(destination);
+            if (vma == vma_map.begin()) {
+                throw std::runtime_error("Metal module write is not mapped");
+            }
+            --vma;
+            VAddr current = destination;
+            u64 remaining = source.size();
+            while (remaining) {
+                if (vma == vma_map.end() || !vma->second.Contains(current, 1) ||
+                    !vma->second.IsMapped()) {
+                    throw std::runtime_error("Metal module write contains an unmapped range");
+                }
+                const auto& area = vma->second;
+                const u64 length = std::min(remaining, area.base + area.size - current);
+                if (HasPhysicalBacking(area)) {
+                    const auto& pages = impl.BackingPages();
+                    VAddr address = current;
+                    u64 size = length;
+                    while (size) {
+                        const auto* entry = pages.find(address / PageSize);
+                        if (!entry || !*entry) {
+                            throw std::runtime_error(
+                                "Metal module write requires physical backing");
+                        }
+                        const auto offset = address % PageSize;
+                        const u64 count = std::min(size, PageSize - offset);
+                        physical_ranges.emplace_back(*entry + offset - impl.BackingBase(), count);
+                        address += count;
+                        size -= count;
+                    }
+                    ranges.push_back({current, length, nullptr});
+                } else if (area.type == VMAType::Code) {
+                    ranges.push_back({current, length,
+                                      std::make_unique<Metal::GuestWriteAlias>(current, length)});
+                } else {
+                    throw std::runtime_error("Unsupported Metal module write mapping");
+                }
+                current += length;
+                remaining -= length;
+                ++vma;
+            }
+            for (const auto& [address, area] : vma_map) {
+                if (!HasPhysicalBacking(area) || False(area.prot & MemoryProt::CpuExec)) {
+                    continue;
+                }
+                for (const auto& [offset, physical] : area.phys_areas) {
+                    for (const auto& [base, size] : physical_ranges) {
+                        if (base < physical.base + physical.size && physical.base < base + size) {
+                            const PAddr first = std::max(base, physical.base);
+                            const PAddr last = std::min(base + size, physical.base + physical.size);
+                            executable_aliases.emplace_back(
+                                area.base + offset + first - physical.base, last - first);
+                        }
+                    }
+                }
+            }
+        }
+        for (const auto& [address, size] : executable_aliases) {
+            if (!rasterizer->IsMapped(address, size)) {
+                throw std::runtime_error("Metal executable alias is not registered");
+            }
+        }
+        if (!rasterizer->InvalidateMemory(destination, source.size())) {
+            throw std::runtime_error("Metal module write is not registered with the native cache");
+        }
+        SmallVector<u8, 64> bytes(source.size());
+        std::memcpy(bytes.data(), source.data(), source.size());
+        if (!rasterizer->WithMemoryWriteWatch(destination, bytes.size(), [&] {
+                source = bytes;
+                for (const auto& range : ranges) {
+                    const auto payload = source.first(range.size);
+                    if (range.alias) {
+                        std::memcpy(range.alias->Data(), payload.data(), payload.size());
+                    } else if (!TryWriteSparseMemory(range.address, payload)) {
+                        throw std::runtime_error("Metal module write lost physical backing");
+                    }
+                    source = source.subspan(range.size);
+                }
+            })) {
+            throw std::runtime_error("Metal module write publication is not registered");
+        }
+        return;
+    }
+#endif
+    if (!source.empty()) {
+        std::memcpy(reinterpret_cast<void*>(destination), source.data(), source.size());
+    }
+}
+
+std::vector<MemoryManager::BackingRange> MemoryManager::GetBackingRanges(VAddr address, u64 size) {
+    constexpr u64 PageSize = u64{1} << AddressSpace::Traits::PAGE_BITS;
+    constexpr u64 AddressSpaceSize = u64{1} << AddressSpace::Traits::ADDRESS_SPACE_BITS;
+    if (address >= AddressSpaceSize || size > AddressSpaceSize - address) {
+        throw std::invalid_argument("Invalid guest backing range");
+    }
+    std::shared_lock lock{mutex};
+    const auto& pages = impl.BackingPages();
+    std::vector<BackingRange> ranges;
+    while (size) {
+        const u64 offset = address % PageSize;
+        const u64 length = std::min(PageSize - offset, size);
+        std::optional<PAddr> physical_address;
+        if (const auto* entry = pages.find(address / PageSize); entry && *entry) {
+            physical_address = static_cast<PAddr>(*entry - impl.BackingBase()) + offset;
+        }
+        if (!ranges.empty() &&
+            ((!physical_address && !ranges.back().physical_address) ||
+             (physical_address && ranges.back().physical_address &&
+              *physical_address == *ranges.back().physical_address + ranges.back().size))) {
+            ranges.back().size += length;
+        } else {
+            ranges.push_back({address, length, physical_address});
+        }
+        address += length;
+        size -= length;
+    }
+    return ranges;
 }
 
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
@@ -202,6 +583,7 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
 
 PAddr MemoryManager::PoolExpand(PAddr search_start, PAddr search_end, u64 size, u64 alignment) {
     std::scoped_lock lk{mutex, unmap_mutex};
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
     alignment = alignment > 0 ? alignment : 64_KB;
 
     auto dmem_area = FindDmemArea(search_start);
@@ -244,6 +626,7 @@ PAddr MemoryManager::PoolExpand(PAddr search_start, PAddr search_end, u64 size, 
 PAddr MemoryManager::Allocate(PAddr search_start, PAddr search_end, u64 size, u64 alignment,
                               s32 memory_type) {
     std::scoped_lock lk{mutex, unmap_mutex};
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
     alignment = alignment > 0 ? alignment : 16_KB;
 
     auto dmem_area = FindDmemArea(search_start);
@@ -281,6 +664,12 @@ PAddr MemoryManager::Allocate(PAddr search_start, PAddr search_end, u64 size, u6
 }
 
 s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
+    if (rasterizer && rasterizer->RequiresMemoryMappingDispatch()) {
+        s32 result{};
+        rasterizer->DispatchMemoryMapping([&] { result = Free(phys_addr, size, is_checked); });
+        return result;
+    }
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
     // Basic bounds checking
     if (phys_addr > total_direct_size || (is_checked && phys_addr + size > total_direct_size)) {
         LOG_ERROR(Kernel_Vmm, "phys_addr {:#x}, size {:#x} goes outside dmem map", phys_addr, size);
@@ -373,6 +762,13 @@ s32 MemoryManager::Free(PAddr phys_addr, u64 size, bool is_checked) {
 }
 
 s32 MemoryManager::PoolCommit(VAddr virtual_addr, u64 size, MemoryProt prot, s32 mtype) {
+    if (rasterizer && rasterizer->RequiresMemoryMappingDispatch()) {
+        s32 result{};
+        rasterizer->DispatchMemoryMapping(
+            [&] { result = PoolCommit(virtual_addr, size, prot, mtype); });
+        return result;
+    }
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
     std::scoped_lock lk{unmap_mutex};
     std::unique_lock lk2{mutex};
     ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
@@ -447,6 +843,7 @@ s32 MemoryManager::PoolCommit(VAddr virtual_addr, u64 size, MemoryProt prot, s32
         // Perform an address space mapping for each physical area
         void* out_addr = impl.Map(current_addr, size_to_map, new_dmem_area.base);
         rasterizer->RegisterMemory(current_addr, size_to_map);
+        rasterizer->ProtectGuestMemory(current_addr, size_to_map, static_cast<u32>(prot));
 
         // Tracy memory tracking breaks from merging memory areas. Disabled for now.
         // TRACK_ALLOC(out_addr, size_to_map, "VMEM");
@@ -513,6 +910,20 @@ MemoryManager::VMAHandle MemoryManager::CreateArea(VAddr virtual_addr, u64 size,
 s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, MemoryProt prot,
                              MemoryMapFlags flags, VMAType type, std::string_view name,
                              bool validate_dmem, PAddr phys_addr, u64 alignment) {
+    if (rasterizer && rasterizer->RequiresMemoryMappingDispatch()) {
+        const std::string mapping_name{name};
+        void* mapped_address{};
+        s32 result{};
+        rasterizer->DispatchMemoryMapping([&] {
+            result = MapMemory(&mapped_address, virtual_addr, size, prot, flags, type, mapping_name,
+                               validate_dmem, phys_addr, alignment);
+        });
+        if (result == ORBIS_OK) {
+            *out_addr = mapped_address;
+        }
+        return result;
+    }
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
     // Certain games perform flexible mappings on loop to determine
     // the available flexible memory size. Questionable but we need to handle this.
     if (type == VMAType::Flexible && flexible_usage + size > total_flexible_size) {
@@ -622,6 +1033,7 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
             // Perform an address space mapping for each physical area
             void* out_addr = impl.Map(current_addr, size_to_map, new_fmem_area.base, is_exec);
             rasterizer->RegisterMemory(current_addr, size_to_map);
+            rasterizer->ProtectGuestMemory(current_addr, size_to_map, static_cast<u32>(prot));
 
             // Tracy memory tracking breaks from merging memory areas. Disabled for now.
             // TRACK_ALLOC(out_addr, size_to_map, "VMEM");
@@ -680,6 +1092,7 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
         if (type != VMAType::Flexible) {
             impl.Map(mapped_addr, size, phys_addr, is_exec);
             rasterizer->RegisterMemory(mapped_addr, size);
+            rasterizer->ProtectGuestMemory(mapped_addr, size, static_cast<u32>(prot));
             // Tracy memory tracking breaks from merging memory areas. Disabled for now.
             // TRACK_ALLOC(mapped_addr, size, "VMEM");
         }
@@ -697,6 +1110,18 @@ s32 MemoryManager::MapMemory(void** out_addr, VAddr virtual_addr, u64 size, Memo
 
 s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, MemoryProt prot,
                            MemoryMapFlags flags, s32 fd, s64 phys_addr) {
+    if (rasterizer && rasterizer->RequiresMemoryMappingDispatch()) {
+        void* mapped_address{};
+        s32 result{};
+        rasterizer->DispatchMemoryMapping([&] {
+            result = MapFile(&mapped_address, virtual_addr, size, prot, flags, fd, phys_addr);
+        });
+        if (result == ORBIS_OK) {
+            *out_addr = mapped_address;
+        }
+        return result;
+    }
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
     uintptr_t handle = 0;
     std::scoped_lock lk{unmap_mutex};
     // Get the file to map
@@ -817,11 +1242,19 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
         rasterizer->RegisterMemory(mapped_addr, size);
     }
 
+    rasterizer->ProtectGuestMemory(mapped_addr, size, static_cast<u32>(prot));
+
     *out_addr = std::bit_cast<void*>(mapped_addr);
     return ORBIS_OK;
 }
 
 s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
+    if (rasterizer && rasterizer->RequiresMemoryMappingDispatch()) {
+        s32 result{};
+        rasterizer->DispatchMemoryMapping([&] { result = PoolDecommit(virtual_addr, size); });
+        return result;
+    }
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
     std::scoped_lock lk{unmap_mutex};
     ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
                virtual_addr);
@@ -900,6 +1333,7 @@ s32 MemoryManager::PoolDecommit(VAddr virtual_addr, u64 size) {
     u64 size_to_unmap = size;
     VAddr unmapped_addr = impl.Unmap(virtual_addr, &size_to_unmap);
     rasterizer->RegisterMemory(unmapped_addr, size_to_unmap);
+    rasterizer->ProtectGuestMemory(unmapped_addr, size_to_unmap, 0);
 
     // Tracy memory tracking breaks from merging memory areas. Disabled for now.
     // TRACK_FREE(virtual_addr, "VMEM");
@@ -912,6 +1346,12 @@ s32 MemoryManager::UnmapMemory(VAddr virtual_addr, u64 size) {
         return ORBIS_OK;
     }
 
+    if (rasterizer && rasterizer->RequiresMemoryMappingDispatch()) {
+        s32 result{};
+        rasterizer->DispatchMemoryMapping([&] { result = UnmapMemory(virtual_addr, size); });
+        return result;
+    }
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
     std::scoped_lock lk{unmap_mutex};
     // Align address and size appropriately
     virtual_addr = Common::AlignDown(virtual_addr, 16_KB);
@@ -997,6 +1437,7 @@ u64 MemoryManager::UnmapBytesFromEntry(VAddr virtual_addr, VirtualMemoryArea vma
         u64 size_to_unmap = size_in_vma;
         VAddr unmapped_addr = impl.Unmap(virtual_addr, &size_to_unmap);
         rasterizer->RegisterMemory(unmapped_addr, size_to_unmap);
+        rasterizer->ProtectGuestMemory(unmapped_addr, size_to_unmap, 0);
 
         // Tracy memory tracking breaks from merging memory areas. Disabled for now.
         // TRACK_FREE(virtual_addr, "VMEM");
@@ -1033,14 +1474,19 @@ s32 MemoryManager::QueryProtection(VAddr addr, void** start, void** end, u32* pr
         return ORBIS_KERNEL_ERROR_EACCES;
     }
 
+    const auto range_start = reinterpret_cast<void*>(vma.base);
+    const auto range_end = reinterpret_cast<void*>(vma.base + vma.size);
+    const auto protection = static_cast<u32>(vma.prot);
+    lk.unlock();
+
     if (start != nullptr) {
-        *start = reinterpret_cast<void*>(vma.base);
+        *start = range_start;
     }
     if (end != nullptr) {
-        *end = reinterpret_cast<void*>(vma.base + vma.size);
+        *end = range_end;
     }
     if (prot != nullptr) {
-        *prot = static_cast<u32>(vma.prot);
+        *prot = protection;
     }
 
     return ORBIS_OK;
@@ -1052,6 +1498,7 @@ s64 MemoryManager::ProtectBytes(VAddr addr, VirtualMemoryArea& vma_base, u64 siz
     const auto adjusted_size = std::min<u64>(vma_base.size - start_in_vma, size);
     const MemoryProt old_prot = vma_base.prot;
     const MemoryProt new_prot = prot;
+    const VMAType type = vma_base.type;
 
     if (vma_base.type == VMAType::Free || vma_base.type == VMAType::PoolReserved) {
         // On PS4, protecting freed memory does nothing.
@@ -1098,14 +1545,16 @@ s64 MemoryManager::ProtectBytes(VAddr addr, VirtualMemoryArea& vma_base, u64 siz
     new_vma.prot = prot;
     MergeAdjacent(vma_map, new_it);
 
-    if (vma_base.type == VMAType::Reserved) {
+    if (type == VMAType::Reserved) {
         // On PS4, protections change vma_map, but don't apply.
         // Return early to avoid protecting memory that isn't mapped in address space.
         return adjusted_size;
     }
 
     // Perform address-space memory protections if needed.
-    if (new_prot != old_prot) {
+    if ((!rasterizer ||
+         !rasterizer->ProtectGuestMemory(addr, adjusted_size, static_cast<u32>(new_prot))) &&
+        new_prot != old_prot) {
         impl.Protect(addr, adjusted_size, perms);
     }
 
@@ -1120,6 +1569,7 @@ s32 MemoryManager::Protect(VAddr addr, u64 size, MemoryProt prot) {
 
     // Ensure the range to modify is valid
     std::scoped_lock lk{mutex, unmap_mutex};
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
     ASSERT_MSG(IsValidMapping(addr, size), "Attempted to access invalid address {:#x}", addr);
 
     // Appropriately restrict flags.
@@ -1169,28 +1619,42 @@ s32 MemoryManager::VirtualQuery(VAddr addr, s32 flags,
     }
 
     const auto& vma = it->second;
-    info->start = vma.base;
-    info->end = vma.base + vma.size;
-    info->offset = 0;
-    info->protection = static_cast<s32>(vma.prot);
-    info->is_flexible = vma.type == VMAType::Flexible ? 1 : 0;
-    info->is_direct = vma.type == VMAType::Direct ? 1 : 0;
-    info->is_stack = vma.type == VMAType::Stack ? 1 : 0;
-    info->is_pooled = vma.type == VMAType::PoolReserved || vma.type == VMAType::Pooled ? 1 : 0;
-    info->is_committed = vma.IsMapped() ? 1 : 0;
-    info->memory_type = 0;
+    ::Libraries::Kernel::OrbisVirtualQueryInfo snapshot{};
+    snapshot.start = vma.base;
+    snapshot.end = vma.base + vma.size;
+    snapshot.offset = 0;
+    snapshot.protection = static_cast<s32>(vma.prot);
+    snapshot.is_flexible = vma.type == VMAType::Flexible ? 1 : 0;
+    snapshot.is_direct = vma.type == VMAType::Direct ? 1 : 0;
+    snapshot.is_stack = vma.type == VMAType::Stack ? 1 : 0;
+    snapshot.is_pooled = vma.type == VMAType::PoolReserved || vma.type == VMAType::Pooled ? 1 : 0;
+    snapshot.is_committed = vma.IsMapped() ? 1 : 0;
+    snapshot.memory_type = 0;
     if (vma.type == VMAType::Direct) {
         // Offset is only assigned for direct mappings.
         ASSERT_MSG(vma.phys_areas.size() > 0, "No physical backing for direct mapping?");
-        info->offset = vma.phys_areas.begin()->second.base;
-        info->memory_type = vma.phys_areas.begin()->second.memory_type;
+        snapshot.offset = vma.phys_areas.begin()->second.base;
+        snapshot.memory_type = vma.phys_areas.begin()->second.memory_type;
     }
     if (vma.type == VMAType::Reserved || vma.type == VMAType::PoolReserved) {
         // Protection is hidden from reserved mappings.
-        info->protection = 0;
+        snapshot.protection = 0;
     }
 
-    strncpy(info->name, vma.name.data(), ::Libraries::Kernel::ORBIS_KERNEL_MAXIMUM_NAME_LENGTH);
+    strncpy(snapshot.name, vma.name.data(), ::Libraries::Kernel::ORBIS_KERNEL_MAXIMUM_NAME_LENGTH);
+
+    lk.unlock();
+    info->start = snapshot.start;
+    info->end = snapshot.end;
+    info->offset = snapshot.offset;
+    info->protection = snapshot.protection;
+    info->memory_type = snapshot.memory_type;
+    info->is_flexible = snapshot.is_flexible;
+    info->is_direct = snapshot.is_direct;
+    info->is_stack = snapshot.is_stack;
+    info->is_pooled = snapshot.is_pooled;
+    info->is_committed = snapshot.is_committed;
+    std::memcpy(info->name, snapshot.name, sizeof(snapshot.name));
 
     return ORBIS_OK;
 }
@@ -1214,18 +1678,25 @@ s32 MemoryManager::DirectMemoryQuery(PAddr addr, bool find_next,
         return ORBIS_KERNEL_ERROR_EACCES;
     }
 
-    out_info->start = dmem_area->second.base;
-    out_info->memoryType = dmem_area->second.memory_type;
+    const auto range_start = dmem_area->second.base;
+    const auto memory_type = dmem_area->second.memory_type;
+    std::optional<uintptr_t> range_end;
 
     // Loop through all sequential mapped or allocated dmem areas
     // to determine the hardware accurate end.
-    while (dmem_area != dmem_map.end() && dmem_area->second.memory_type == out_info->memoryType &&
+    while (dmem_area != dmem_map.end() && dmem_area->second.memory_type == memory_type &&
            (dmem_area->second.dma_type == PhysicalMemoryType::Mapped ||
             dmem_area->second.dma_type == PhysicalMemoryType::Allocated)) {
-        out_info->end = dmem_area->second.GetEnd();
+        range_end = dmem_area->second.GetEnd();
         dmem_area++;
     }
 
+    lk.unlock();
+    out_info->start = range_start;
+    out_info->memoryType = memory_type;
+    if (range_end) {
+        out_info->end = *range_end;
+    }
     return ORBIS_OK;
 }
 
@@ -1271,6 +1742,7 @@ s32 MemoryManager::DirectQueryAvailable(PAddr search_start, PAddr search_end, u6
         dmem_area++;
     }
 
+    lk.unlock();
     *phys_addr_out = paddr;
     *size_out = max_size;
     return ORBIS_OK;
@@ -1278,6 +1750,7 @@ s32 MemoryManager::DirectQueryAvailable(PAddr search_start, PAddr search_end, u6
 
 s32 MemoryManager::SetDirectMemoryType(VAddr addr, u64 size, s32 memory_type) {
     std::scoped_lock lk{mutex, unmap_mutex};
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
 
     ASSERT_MSG(IsValidMapping(addr, size), "Attempted to access invalid address {:#x}", addr);
 
@@ -1327,7 +1800,9 @@ s32 MemoryManager::SetDirectMemoryType(VAddr addr, u64 size, s32 memory_type) {
 }
 
 void MemoryManager::NameVirtualRange(VAddr virtual_addr, u64 size, std::string_view name) {
+    const std::string range_name{name};
     std::scoped_lock lk{mutex, unmap_mutex};
+    const auto memory_operation = GuardMemoryOperation(rasterizer);
 
     // Sizes are aligned up to the nearest 16_KB
     u64 aligned_size = Common::AlignUp(size, 16_KB);
@@ -1347,10 +1822,10 @@ void MemoryManager::NameVirtualRange(VAddr virtual_addr, u64 size, std::string_v
             if (size_in_vma < it->second.size) {
                 it = CarveVMA(current_addr, size_in_vma);
                 auto& new_vma = it->second;
-                new_vma.name = name;
+                new_vma.name = range_name;
             } else {
                 auto& vma = it->second;
-                vma.name = name;
+                vma.name = range_name;
             }
         }
         remaining_size -= size_in_vma;
@@ -1379,9 +1854,13 @@ s32 MemoryManager::GetDirectMemoryType(PAddr addr, s32* directMemoryTypeOut,
         return ORBIS_KERNEL_ERROR_ENOENT;
     }
 
-    *directMemoryStartOut = reinterpret_cast<void*>(dmem_area.base);
-    *directMemoryEndOut = reinterpret_cast<void*>(dmem_area.GetEnd());
-    *directMemoryTypeOut = dmem_area.memory_type;
+    const auto range_start = reinterpret_cast<void*>(dmem_area.base);
+    const auto range_end = reinterpret_cast<void*>(dmem_area.GetEnd());
+    const auto memory_type = dmem_area.memory_type;
+    lk.unlock();
+    *directMemoryStartOut = range_start;
+    *directMemoryEndOut = range_end;
+    *directMemoryTypeOut = memory_type;
     return ORBIS_OK;
 }
 
@@ -1400,6 +1879,7 @@ s32 MemoryManager::IsStack(VAddr addr, void** start, void** end) {
         stack_end = vma.base + vma.size;
     }
 
+    lk.unlock();
     if (start != nullptr) {
         *start = reinterpret_cast<void*>(stack_start);
     }
@@ -1425,6 +1905,7 @@ s32 MemoryManager::GetMemoryPoolStats(::Libraries::Kernel::OrbisKernelMemoryPool
         dma_handle++;
     }
 
+    lk.unlock();
     stats->allocated_flushed_blocks = committed_size / block_size;
     stats->available_flushed_blocks = committed_size / block_size;
     // TODO: Determine how "cached blocks" work

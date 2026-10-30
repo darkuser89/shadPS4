@@ -9,11 +9,13 @@
 #include <imgui.h>
 
 #include "common/types.h"
+#include "imgui/renderer/texture_manager.h"
 
 namespace BigPictureMode {
 
 struct IconInfo {
-    ImTextureID textureId;
+    ImTextureID textureId{};
+    std::shared_ptr<void> textureLifetime;
     std::filesystem::path ebootPath;
     std::string title;
     std::string serial;
@@ -22,7 +24,7 @@ struct IconInfo {
 
 void Launch(char* executableName, bool sameProcess);
 void GetGameIconInfo(std::vector<IconInfo>& icons);
-SDL_Texture* LoadSdlTextureData(std::vector<u8> data);
-SDL_Texture* LoadSdlTextureDataFromFile(std::filesystem::path filePath);
+ImGui::Core::TextureManager::NativeTexture LoadTextureData(std::vector<u8> data);
+ImGui::Core::TextureManager::NativeTexture LoadTextureDataFromFile(std::filesystem::path filePath);
 
 } // namespace BigPictureMode

@@ -174,6 +174,26 @@ std::string NameOf(Attribute attribute) {
         return "BaseInstance";
     case Attribute::IsHelperInvocation:
         return "IsHelperInvocation";
+    case Attribute::GeometryVertexOffset:
+        return "GeometryVertexOffset";
+    case Attribute::GeometryRingOffset:
+        return "GeometryRingOffset";
+    case Attribute::GeometryWaveId:
+        return "GeometryWaveId";
+    case Attribute::GeometryCopyScalar:
+        return "GeometryCopyScalar";
+    case Attribute::GeometryCopyVector:
+        return "GeometryCopyVector";
+    case Attribute::GeometryExportScalar:
+        return "GeometryExportScalar";
+    case Attribute::GeometryExportVector:
+        return "GeometryExportVector";
+    case Attribute::GeometryInitialActiveCount:
+        return "GeometryInitialActiveCount";
+    case Attribute::GeometryCopyActive:
+        return "GeometryCopyActive";
+    case Attribute::GeometryInputActive:
+        return "GeometryInputActive";
     default:
         break;
     }

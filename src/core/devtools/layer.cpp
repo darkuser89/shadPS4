@@ -15,7 +15,7 @@
 #include "imgui/imgui_std.h"
 #include "imgui_internal.h"
 #include "options.h"
-#include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/presenter.h"
 #include "widget/frame_dump.h"
 #include "widget/frame_graph.h"
 #include "widget/gpu_memory.h"
@@ -23,7 +23,7 @@
 #include "widget/module_list.h"
 #include "widget/shader_list.h"
 
-extern std::unique_ptr<Vulkan::Presenter> presenter;
+extern std::unique_ptr<VideoCore::Presenter> presenter;
 
 using namespace ImGui;
 using namespace ::Core::Devtools;
@@ -94,26 +94,48 @@ void L::DrawMenuBar() {
             ImGui::EndMenu();
         }
         if (BeginMenu("Display")) {
-            auto& pp_settings = presenter->GetPPSettingsRef();
+            auto settings = presenter->GetDisplaySettings();
             if (BeginMenu("Brightness")) {
-                SliderFloat("Gamma", &pp_settings.gamma, 0.1f, 2.0f);
+                if (SliderFloat("Gamma", &settings.post_processing.gamma, 0.1f, 2.0f)) {
+                    presenter->SetGamma(settings.post_processing.gamma);
+                }
+                ImGui::EndMenu();
+            }
+            if (presenter->SupportsMetalFx() && BeginMenu("MetalFX")) {
+                if (Checkbox("MetalFX Spatial", &settings.metal_fx)) {
+                    presenter->SetMetalFxEnabled(settings.metal_fx);
+                }
+                if (Button("Save")) {
+                    settings = presenter->GetDisplaySettings();
+                    EmulatorSettings.SetMetalFxEnabled(settings.metal_fx);
+                    EmulatorSettings.SetFsrEnabled(settings.fsr.enable);
+                    EmulatorSettings.Save();
+                    CloseCurrentPopup();
+                }
                 ImGui::EndMenu();
             }
             if (BeginMenu("FSR")) {
-                auto& fsr = presenter->GetFsrSettingsRef();
-                Checkbox("FSR Enabled", &fsr.enable);
+                auto& fsr = settings.fsr;
+                if (Checkbox("FSR Enabled", &fsr.enable)) {
+                    presenter->SetFsrEnabled(fsr.enable);
+                }
                 BeginDisabled(!fsr.enable);
                 {
-                    Checkbox("RCAS", &fsr.use_rcas);
+                    if (Checkbox("RCAS", &fsr.use_rcas)) {
+                        presenter->SetRcasEnabled(fsr.use_rcas);
+                    }
                     BeginDisabled(!fsr.use_rcas);
                     {
-                        SliderFloat("RCAS Attenuation", &fsr.rcas_attenuation, 0.0, 3.0);
+                        if (SliderFloat("RCAS Attenuation", &fsr.rcas_attenuation, 0.0, 3.0)) {
+                            presenter->SetRcasAttenuation(fsr.rcas_attenuation);
+                        }
                     }
                     EndDisabled();
                 }
                 EndDisabled();
 
                 if (Button("Save")) {
+                    EmulatorSettings.SetMetalFxEnabled(presenter->GetDisplaySettings().metal_fx);
                     EmulatorSettings.SetFsrEnabled(fsr.enable);
                     EmulatorSettings.SetRcasEnabled(fsr.use_rcas);
                     EmulatorSettings.SetRcasAttenuation(

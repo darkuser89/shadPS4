@@ -21,6 +21,10 @@
 #include "imgui/imgui_std.h"
 #include "imgui/renderer/font_stack.h"
 #include "sdl_window.h"
+#ifdef __APPLE__
+#include "video_core/renderer_metal/metal_big_picture.h"
+#include "video_core/renderer_metal/metal_platform.h"
+#endif
 
 namespace BigPictureMode {
 
@@ -34,6 +38,9 @@ std::vector<IconInfo> gameIcons = {};
 
 float uiScale = 1.0f;
 SDL_Renderer* renderer;
+#ifdef __APPLE__
+std::unique_ptr<Metal::BigPictureRenderer> metal_renderer;
+#endif
 
 namespace {
 
@@ -128,38 +135,45 @@ void SetGameIcons(std::vector<IconInfo>& gameIcons) {
 
 } // namespace
 
-SDL_Texture* LoadSdlTextureData(std::vector<u8> data) {
-    int image_width = 0;
-    int image_height = 0;
-    int channels = 4;
-    unsigned char* image_data = stbi_load_from_memory(
-        (const unsigned char*)data.data(), (int)data.size(), &image_width, &image_height, NULL, 4);
-    if (image_data == nullptr) {
+ImGui::Core::TextureManager::NativeTexture LoadTextureData(std::vector<u8> data) {
+    int width{}, height{};
+    std::unique_ptr<stbi_uc, decltype(&stbi_image_free)> pixels{
+        stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &width, &height, nullptr,
+                              4),
+        stbi_image_free};
+    if (!pixels) {
         LOG_ERROR(ImGui, "Failed to load image: {}", stbi_failure_reason());
+        return {};
     }
-
-    SDL_Surface* surface = SDL_CreateSurfaceFrom(image_width, image_height, SDL_PIXELFORMAT_RGBA32,
-                                                 (void*)image_data, channels * image_width);
-    if (surface == nullptr) {
+#ifdef __APPLE__
+    if (!metal_renderer) {
+        LOG_ERROR(ImGui, "Metal 4 Big Picture renderer is not initialized");
+        return {};
+    }
+    return metal_renderer->Upload({pixels.get(), size_t{static_cast<u32>(width)} * height * 4},
+                                  width, height);
+#else
+    auto* surface =
+        SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_RGBA32, pixels.get(), width * 4);
+    if (!surface) {
         LOG_ERROR(ImGui, "Unable to create SDL surface: {}", SDL_GetError());
+        return {};
     }
-
-    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-    if (texture == nullptr) {
-        LOG_ERROR(ImGui, "Unable to create SDL texture: {}", SDL_GetError());
-    }
-
+    auto* texture = SDL_CreateTextureFromSurface(renderer, surface);
     SDL_DestroySurface(surface);
-    stbi_image_free(image_data);
-
-    return texture;
+    if (!texture) {
+        LOG_ERROR(ImGui, "Unable to create SDL texture: {}", SDL_GetError());
+        return {};
+    }
+    return {ImTextureID(texture), std::shared_ptr<SDL_Texture>{texture, SDL_DestroyTexture}};
+#endif
 }
 
-SDL_Texture* LoadSdlTextureDataFromFile(std::filesystem::path filePath) {
+ImGui::Core::TextureManager::NativeTexture LoadTextureDataFromFile(std::filesystem::path filePath) {
     std::ifstream file(filePath, std::ios::binary);
     std::vector<u8> data =
         std::vector<u8>(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-    return LoadSdlTextureData(data);
+    return LoadTextureData(std::move(data));
 }
 
 void scanFolder(std::vector<IconInfo>& icons, std::filesystem::path folderPath, int depth) {
@@ -244,8 +258,9 @@ void scanFolder(std::vector<IconInfo>& icons, std::filesystem::path folderPath, 
         const std::string iconFileName = "icon0.png";
         std::filesystem::path iconPath = UpdateChecker(iconFileName, entry.path());
 
-        SDL_Texture* texture = LoadSdlTextureDataFromFile(iconPath);
-        icon.textureId = ImTextureID(texture);
+        auto texture = LoadTextureDataFromFile(iconPath);
+        icon.textureId = texture.id;
+        icon.textureLifetime = std::move(texture.lifetime);
 
         icon.ebootPath = entry.path() / "eboot.bin";
         if (Core::FileSys::IsZArchiveFile(entry.path())) {
@@ -273,6 +288,15 @@ void GetGameIconInfo(std::vector<IconInfo>& icons) {
 }
 
 void Launch(char* executableName, bool sameProcess) {
+    done = false;
+    showSettings = false;
+    runEbootPath.clear();
+#ifdef __APPLE__
+    constexpr bool native_metal = true;
+    Metal::RequireAppleSilicon();
+#else
+    constexpr bool native_metal = false;
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         LOG_ERROR(ImGui, "SDL_INIT_VIDEO Error: {}", SDL_GetError());
         SDL_Quit();
@@ -283,9 +307,10 @@ void Launch(char* executableName, bool sameProcess) {
         LOG_ERROR(ImGui, "SDL_INIT_GAMEPAD Error: {}", SDL_GetError());
     }
 
-    SDL_Window* window =
-        SDL_CreateWindow("shadPS4 Big Picture Mode", 1280, 720,
-                         EmulatorSettings.IsFullScreen() ? SDL_WINDOW_FULLSCREEN : 0);
+    SDL_Window* window = SDL_CreateWindow(
+        native_metal ? "shadPS4 Big Picture Mode - Metal 4" : "shadPS4 Big Picture Mode", 1280, 720,
+        (EmulatorSettings.IsFullScreen() ? SDL_WINDOW_FULLSCREEN : 0) |
+            (native_metal ? SDL_WINDOW_METAL : 0));
     if (window == nullptr) {
         LOG_ERROR(ImGui, "SDL Window Creation Error: {}", SDL_GetError());
         SDL_Quit();
@@ -293,7 +318,15 @@ void Launch(char* executableName, bool sameProcess) {
     }
 
     Frontend::SetDefaultWindowIcon(window);
-    renderer = SDL_CreateRenderer(window, nullptr);
+    if (!native_metal) {
+        renderer = SDL_CreateRenderer(window, nullptr);
+        if (!renderer) {
+            LOG_ERROR(ImGui, "SDL Renderer Creation Error: {}", SDL_GetError());
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return;
+        }
+    }
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -311,16 +344,26 @@ void Launch(char* executableName, bool sameProcess) {
         io.Fonts, 64.0f, EmulatorSettings.GetConsoleLanguage(), cfgBase, true);
     io.FontGlobalScale = 0.5f;
     // size the big picture font atlas cap from the renderer limit
-    const auto max_dim = SDL_GetNumberProperty(SDL_GetRendererProperties(renderer),
-                                               SDL_PROP_RENDERER_MAX_TEXTURE_SIZE_NUMBER, 8192);
+    const auto max_dim =
+        native_metal ? 16384
+                     : SDL_GetNumberProperty(SDL_GetRendererProperties(renderer),
+                                             SDL_PROP_RENDERER_MAX_TEXTURE_SIZE_NUMBER, 8192);
     const int atlas_max = static_cast<int>(std::bit_floor(std::max<u64>(max_dim, 512)));
     io.Fonts->TexMaxWidth = atlas_max;
     io.Fonts->TexMaxHeight = atlas_max;
 
-    ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
-    ImGui_ImplSDLRenderer3_Init(renderer);
+#ifdef __APPLE__
+    if (native_metal) {
+        ImGui_ImplSDL3_InitForMetal(window);
+        metal_renderer = std::make_unique<Metal::BigPictureRenderer>(window);
+    } else
+#endif
+    {
+        ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
+        ImGui_ImplSDLRenderer3_Init(renderer);
+    }
 
-    ImGuiEmuSettings::SettingsWindow settingsWindow(false);
+    auto settingsWindow = std::make_unique<ImGuiEmuSettings::SettingsWindow>(false);
 
     float sliderScale = 1.0f;
     auto applySettings = [&] {
@@ -341,7 +384,9 @@ void Launch(char* executableName, bool sameProcess) {
             }
         }
 
-        ImGui_ImplSDLRenderer3_NewFrame();
+        if (!native_metal) {
+            ImGui_ImplSDLRenderer3_NewFrame();
+        }
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
@@ -420,7 +465,7 @@ void Launch(char* executableName, bool sameProcess) {
         if (ImGui::Button("Settings")) {
             EmulatorSettings.SetBigPictureScale(static_cast<int>(uiScale * 1000));
             EmulatorSettings.Save();
-            settingsWindow.Prepare();
+            settingsWindow->Prepare();
             showSettings = true;
         }
 
@@ -454,24 +499,39 @@ void Launch(char* executableName, bool sameProcess) {
         }
 
         if (showSettings) {
-            settingsWindow.DrawSettings(&showSettings, applySettings);
+            settingsWindow->DrawSettings(&showSettings, applySettings);
         }
 
         ImGui::PopStyleVar(8);
         ImGui::PopStyleColor(5);
         ImGui::End();
         ImGui::Render();
-        SDL_SetRenderDrawColor(renderer, 100, 100, 100, 255);
-        SDL_RenderClear(renderer);
-        ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
-        SDL_RenderPresent(renderer);
+#ifdef __APPLE__
+        if (native_metal) {
+            metal_renderer->Render(*ImGui::GetDrawData());
+        } else
+#endif
+        {
+            SDL_SetRenderDrawColor(renderer, 100, 100, 100, 255);
+            SDL_RenderClear(renderer);
+            ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
+            SDL_RenderPresent(renderer);
+        }
     }
-
-    ImGui_ImplSDLRenderer3_Shutdown();
+    settingsWindow.reset();
+    gameIcons.clear();
+#ifdef __APPLE__
+    metal_renderer.reset();
+#endif
+    if (!native_metal) {
+        ImGui_ImplSDLRenderer3_Shutdown();
+    }
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
-    SDL_DestroyRenderer(renderer);
-    renderer = nullptr;
+    if (renderer) {
+        SDL_DestroyRenderer(renderer);
+        renderer = nullptr;
+    }
     SDL_DestroyWindow(window);
     SDL_Quit();
 

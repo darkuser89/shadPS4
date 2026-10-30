@@ -213,6 +213,8 @@ public:
 
     s32 Start(u64 args, const void* argp, void* param);
     void LoadModuleToMemory(u32& max_tls_index);
+    void FinalizeMemoryProtection();
+    void WriteRelocation(VAddr address, u64 value);
     void LoadDynamicInfo();
     void LoadSymbols();
 
@@ -243,6 +245,9 @@ public:
     ThreadLocalImage tls{};
     OrbisKernelModuleInfo info{};
     std::vector<u8> rela_bits;
+
+private:
+    bool memory_protection_pending{};
 };
 
 } // namespace Core

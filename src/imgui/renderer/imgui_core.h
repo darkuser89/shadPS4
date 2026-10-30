@@ -5,8 +5,22 @@
 
 #include <imgui.h>
 
-#include "video_core/renderer_vulkan/vk_instance.h"
-#include "vulkan/vulkan_handles.hpp"
+#include "common/types.h"
+
+namespace Frontend {
+class WindowSDL;
+}
+namespace Vulkan {
+class Instance;
+}
+namespace vk {
+class Device;
+class CommandBuffer;
+class ImageView;
+struct Extent2D;
+struct AllocationCallbacks;
+enum class Format : int32_t;
+} // namespace vk
 
 union SDL_Event;
 
@@ -19,6 +33,9 @@ namespace ImGui::Core {
 void Initialize(const Vulkan::Instance& instance, const Frontend::WindowSDL& window,
                 u32 image_count, vk::Format surface_format,
                 const vk::AllocationCallbacks* allocator = nullptr);
+
+void InitializeNative(const Frontend::WindowSDL& window, u32 max_texture_dimension);
+void ShutdownNative();
 
 void OnResize();
 

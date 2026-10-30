@@ -6,9 +6,9 @@
 #include <memory>
 #include <imgui.h>
 
-#include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/presenter.h"
 
-extern std::unique_ptr<Vulkan::Presenter> presenter;
+extern std::unique_ptr<VideoCore::Presenter> presenter;
 
 namespace Core::Devtools {
 

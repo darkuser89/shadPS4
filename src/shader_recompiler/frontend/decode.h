@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cstring>
+#include <stdexcept>
 #include "shader_recompiler/frontend/instruction.h"
 
 namespace Shader::Gcn {
@@ -26,20 +28,30 @@ Opcode DecodeOpcode(u32 token);
 
 class GcnCodeSlice {
 public:
-    GcnCodeSlice(const u32* ptr, const u32* end) : m_ptr(ptr), m_end(end) {}
+    GcnCodeSlice(const u32* ptr, const u32* end, bool bounded = false)
+        : m_ptr(ptr), m_end(end), m_bounded(bounded) {}
     GcnCodeSlice(const GcnCodeSlice& other) = default;
     ~GcnCodeSlice() = default;
 
     u32 at(u32 id) const {
+        if (m_bounded && id >= m_end - m_ptr) {
+            throw std::runtime_error("Shader instruction exceeds code slice");
+        }
         return m_ptr[id];
     }
 
     u32 readu32() {
-        return *(m_ptr++);
+        const u32 value = at(0);
+        ++m_ptr;
+        return value;
     }
 
     u64 readu64() {
-        const u64 value = *(u64*)m_ptr;
+        if (m_bounded && m_end - m_ptr < 2) {
+            throw std::runtime_error("Shader instruction exceeds code slice");
+        }
+        u64 value;
+        std::memcpy(&value, m_ptr, sizeof(value));
         m_ptr += 2;
         return value;
     }
@@ -51,6 +63,7 @@ public:
 private:
     const u32* m_ptr{};
     const u32* m_end{};
+    bool m_bounded{};
 };
 
 class GcnDecodeContext {

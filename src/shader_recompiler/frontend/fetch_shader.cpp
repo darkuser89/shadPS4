@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
 #include <utility>
 #include "common/assert.h"
 #include "shader_recompiler/frontend/decode.h"
@@ -34,10 +37,13 @@ namespace Shader::Gcn {
  * We take the reverse way, extract the original input semantics from these instructions.
  **/
 
-const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base) {
+std::span<const u32> GetFetchShaderCode(const Info& info, u32 sgpr_base) {
+    if (info.read_fetch_shader) {
+        return info.read_fetch_shader(sgpr_base);
+    }
     const u32* code;
     std::memcpy(&code, &info.user_data[sgpr_base], sizeof(code));
-    return code;
+    return {code, std::numeric_limits<u32>::max()};
 }
 
 bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data) {
@@ -45,7 +51,11 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
         return false;
     }
 
-    out_fetch_data.attributes.clear();
+    if (info.read_fetch_shader) {
+        out_fetch_data = {};
+    } else {
+        out_fetch_data.attributes.clear();
+    }
 
     struct VsharpLoad {
         u32 dword_offset{};
@@ -53,9 +63,12 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
     };
     std::array<VsharpLoad, 104> loads{};
 
-    const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
-    const u32* ptr = code;
+    const auto code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
+    const u32* ptr = code.data();
     while (true) {
+        if (info.read_fetch_shader && ptr == code.data() + code.size()) {
+            throw std::runtime_error("Fetch shader snapshot has no return instruction");
+        }
         const u32 word0 = *(ptr++);
         const auto encoding = GetInstructionEncoding(word0);
 
@@ -69,6 +82,9 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
             const u32 sbase = (word0 >> 9) & 0x3f;
             const u32 offset = word0 & 0xff;
             ASSERT(opcode == OpcodeSMRD::S_LOAD_DWORDX4);
+            if (info.read_fetch_shader && sdst >= loads.size()) {
+                throw std::runtime_error("Fetch shader descriptor register exceeds capacity");
+            }
             loads[sdst] = VsharpLoad{offset, sbase * 2};
         } else if (encoding == InstEncoding::VOP2) {
             const auto opcode = OpcodeVOP2((word0 >> 25) & 0x3f);
@@ -87,8 +103,14 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
             }
         } else if (encoding == InstEncoding::MUBUF || encoding == InstEncoding::MTBUF) {
             // SRSRC is in units of 4 SPGRs while SBASE is in pairs of SGPRs
+            if (info.read_fetch_shader && ptr == code.data() + code.size()) {
+                throw std::runtime_error("Fetch shader snapshot has an incomplete buffer load");
+            }
             const u32 word1 = *(ptr++);
             const u32 srsrc = ((word1 >> 16) & 0x1f) * 4;
+            if (info.read_fetch_shader && srsrc >= loads.size()) {
+                throw std::runtime_error("Fetch shader resource register exceeds capacity");
+            }
             auto& attrib = out_fetch_data.attributes.emplace_back();
             attrib.dest_vgpr = (word1 >> 8) & 0xff;
             if (encoding == InstEncoding::MUBUF) {
@@ -117,6 +139,13 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
                 attrib.data_format = 0;
                 attrib.num_format = 0;
             }
+            if (info.supports_vertex_attribute) {
+                const auto buffer = attrib.GetSharp(info);
+                const u32 offset = word0 & 0xfff;
+                out_fetch_data.requires_native_lowering |=
+                    offset != attrib.inst_offset ||
+                    (buffer.GetStride() && offset >= buffer.GetStride());
+            }
         } else if (encoding == InstEncoding::SOPP) {
             const auto opcode = OpcodeSOPP((word0 >> 16) & 0x7f);
             ASSERT(opcode == OpcodeSOPP::S_WAITCNT);
@@ -131,7 +160,20 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
         }
     }
 
-    out_fetch_data.size = (ptr - code) * sizeof(u32);
+    out_fetch_data.size = (ptr - code.data()) * sizeof(u32);
+    if (info.supports_vertex_attribute) {
+        using Step = VertexAttribute::InstanceIdType;
+        out_fetch_data.requires_native_lowering |=
+            (out_fetch_data.instance_offset_sgpr != -1 &&
+             std::ranges::any_of(out_fetch_data.attributes,
+                                 [](const auto& attribute) {
+                                     return attribute.GetStepRate() == Step::OverStepRate0 ||
+                                            attribute.GetStepRate() == Step::OverStepRate1;
+                                 })) ||
+            std::ranges::any_of(out_fetch_data.attributes, [&](const auto& attribute) {
+                return !info.supports_vertex_attribute(attribute, out_fetch_data, info);
+            });
+    }
     return true;
 }
 

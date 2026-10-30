@@ -4,6 +4,9 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
+#include <memory>
+#include <span>
 #include <vector>
 
 #include "common/types.h"
@@ -17,7 +20,14 @@ namespace ImGui::Core::TextureManager {
 
 struct Inner;
 
-void StartWorker();
+struct NativeTexture {
+    ImTextureID id{};
+    std::shared_ptr<void> lifetime;
+};
+using NativeUpload = std::function<NativeTexture(std::span<const u8>, u32, u32)>;
+
+void SetNativeUpload(NativeUpload upload);
+void StartWorker(bool native_backend);
 
 void StopWorker();
 

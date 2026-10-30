@@ -30,7 +30,7 @@ struct Use {
 
 class Inst : public boost::intrusive::list_base_hook<> {
 public:
-    explicit Inst(IR::Opcode op_, u32 flags_) noexcept;
+    explicit Inst(IR::Opcode op_, u64 flags_) noexcept;
     explicit Inst(const Inst& base);
     ~Inst();
 

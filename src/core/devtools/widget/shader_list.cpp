@@ -15,10 +15,11 @@
 #include "core/emulator_settings.h"
 #include "imgui/imgui_std.h"
 #include "sdl_window.h"
-#include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/presenter.h"
+#include "video_core/renderer_compat.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
-extern std::unique_ptr<Vulkan::Presenter> presenter;
+extern std::unique_ptr<VideoCore::Presenter> presenter;
 
 using namespace ImGui;
 
@@ -58,7 +59,12 @@ void ShaderList::Selection::ReloadShader(DebugStateType::ShaderDump& value) {
     if (spv.empty()) {
         return;
     }
-    auto& cache = presenter->GetRasterizer().GetPipelineCache();
+    auto* rasterizer = VideoCore::GetVulkanRasterizer(presenter->GetRasterizer());
+    if (!rasterizer) {
+        LOG_ERROR(Render_Recompiler, "SPIR-V module replacement requires a Vulkan shader cache");
+        return;
+    }
+    auto& cache = rasterizer->GetPipelineCache();
     if (const auto m = cache.ReplaceShader(value.module, spv); m) {
         value.module = *m;
     }

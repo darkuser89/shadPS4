@@ -1092,8 +1092,8 @@ void ImeDialogUi::Draw() {
         SetWindowFontScale(std::max(ui_scale, metrics.input_font_scale));
 
         if (first_render) {
-            const auto game_res = DebugState.game_resolution;
-            const auto out_res = DebugState.output_resolution;
+            const auto game_res = DebugState.game_resolution.load(std::memory_order_relaxed);
+            const auto out_res = DebugState.output_resolution.load(std::memory_order_relaxed);
             const float req_w = has_layout ? static_cast<float>(layout.width)
                                            : static_cast<float>(state->panel_req_width);
             const float req_h = has_layout ? static_cast<float>(layout.height)
@@ -1102,7 +1102,7 @@ void ImeDialogUi::Draw() {
                      "ImeDialog UI metrics: game_res={}x{}, out_res={}x{}, viewport_pos=({}, {}), "
                      "viewport_size=({}, {}), base={}x{}, scale=({:.4f}, {:.4f}), "
                      "panel_req=({}, {}), panel_scaled=({}, {})",
-                     game_res.first, game_res.second, out_res.first, out_res.second,
+                     game_res.width, game_res.height, out_res.width, out_res.height,
                      viewport_offset.x, viewport_offset.y, viewport_size.x, viewport_size.y,
                      viewport.base_w, viewport.base_h, scale_x, scale_y, req_w, req_h,
                      window_size.x, window_size.y);

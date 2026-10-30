@@ -4343,26 +4343,26 @@ constexpr std::array<InstFormat, 112> InstructionFormatMIMG = {{
     {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Float32,
      ScalarType::Float32},
     // 105 = IMAGE_SAMPLE_CD_CL
-    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Undefined,
-     ScalarType::Undefined},
+    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Float32,
+     ScalarType::Float32},
     // 106 = IMAGE_SAMPLE_C_CD
-    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Undefined,
-     ScalarType::Undefined},
+    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Float32,
+     ScalarType::Float32},
     // 107 = IMAGE_SAMPLE_C_CD_CL
-    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Undefined,
-     ScalarType::Undefined},
+    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Float32,
+     ScalarType::Float32},
     // 108 = IMAGE_SAMPLE_CD_O
-    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Undefined,
-     ScalarType::Undefined},
+    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Float32,
+     ScalarType::Float32},
     // 109 = IMAGE_SAMPLE_CD_CL_O
-    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Undefined,
-     ScalarType::Undefined},
+    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Float32,
+     ScalarType::Float32},
     // 110 = IMAGE_SAMPLE_C_CD_O
-    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Undefined,
-     ScalarType::Undefined},
+    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Float32,
+     ScalarType::Float32},
     // 111 = IMAGE_SAMPLE_C_CD_CL_O
-    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Undefined,
-     ScalarType::Undefined},
+    {InstClass::VectorMemImgSmp, InstCategory::VectorMemory, 4, 1, ScalarType::Float32,
+     ScalarType::Float32},
 }};
 
 constexpr std::array<InstFormat, 1> InstructionFormatEXP = {{

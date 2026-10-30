@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <numbers>
+#include <stdexcept>
 #include <magic_enum/magic_enum.hpp>
 
 namespace Shader::Gcn {
@@ -129,6 +130,11 @@ void Translator::EmitPrologue(IR::Block* first_block) {
                            "Fetch shader in indirect draw uses wrong base instance");
             }
         }
+        IR::U32 step_instance_id = instance_id;
+        if (profile.needs_vertex_fetch_lowering && fetch_data.instance_offset_sgpr != -1) {
+            step_instance_id =
+                ir.ISub(instance_id, ir.GetAttributeU32(IR::Attribute::BaseInstance));
+        }
 
         // v0: vertex ID, always present
         ir.SetVectorReg(dst_vreg++, vertex_id);
@@ -146,8 +152,8 @@ void Translator::EmitPrologue(IR::Block* first_block) {
             // v1: instance ID, step rate 0
             if (runtime_info.props.num_input_vgprs > 0) {
                 if (runtime_info.sw.vs.step_rate_0 != 0) {
-                    ir.SetVectorReg(dst_vreg++,
-                                    ir.IDiv(instance_id, ir.Imm32(runtime_info.sw.vs.step_rate_0)));
+                    ir.SetVectorReg(dst_vreg++, ir.IDiv(step_instance_id,
+                                                        ir.Imm32(runtime_info.sw.vs.step_rate_0)));
                 } else {
                     ir.SetVectorReg(dst_vreg++, ir.Imm32(0));
                 }
@@ -155,8 +161,8 @@ void Translator::EmitPrologue(IR::Block* first_block) {
             // v2: instance ID, step rate 1
             if (runtime_info.props.num_input_vgprs > 1) {
                 if (runtime_info.sw.vs.step_rate_1 != 0) {
-                    ir.SetVectorReg(dst_vreg++,
-                                    ir.IDiv(instance_id, ir.Imm32(runtime_info.sw.vs.step_rate_1)));
+                    ir.SetVectorReg(dst_vreg++, ir.IDiv(step_instance_id,
+                                                        ir.Imm32(runtime_info.sw.vs.step_rate_1)));
                 } else {
                     ir.SetVectorReg(dst_vreg++, ir.Imm32(0));
                 }
@@ -1155,20 +1161,57 @@ template void Translator::SetDstPk<IR::F32, false>(const InstOperand& operand,
 void Translator::EmitFetch(const GcnInst& inst) {
     const auto code_sgpr_base = inst.src[0].code;
 
-    if (EmulatorSettings.IsInlineFetchShader()) {
+    bool lower_native_fetch{};
+    if (profile.needs_vertex_fetch_lowering && !EmulatorSettings.IsInlineFetchShader() &&
+        !profile.needs_geometry_export_lowering) {
+        info.has_fetch_shader = true;
+        info.fetch_shader_sgpr_base = code_sgpr_base;
+        ASSERT(ParseFetchShader(info, fetch_data));
+        lower_native_fetch = fetch_data.requires_native_lowering;
+        if (lower_native_fetch) {
+            info.has_fetch_shader = false;
+            fetch_data = {};
+        }
+    }
+    const bool native_fetch = profile.needs_geometry_export_lowering || lower_native_fetch;
+    if (EmulatorSettings.IsInlineFetchShader() || native_fetch) {
+        if (native_fetch) {
+            if (!info.read_fetch_shader) {
+                throw std::runtime_error("Native fetch requires a bounded shader reader");
+            }
+            const IR::ScalarReg return_reg{inst.dst[0].code};
+            ir.SetScalarReg(return_reg, ir.GetPcLo(ir.Imm32(pc)));
+            ir.SetScalarReg(return_reg + 1, ir.Imm32(0u));
+        }
         // Translate fetch shader inline using regular buffer bindings; useful for debugging.
-        const auto* code = GetFetchShaderCode(info, code_sgpr_base);
-        GcnCodeSlice slice(code, code + std::numeric_limits<u32>::max());
+        const auto code = GetFetchShaderCode(info, code_sgpr_base);
+        GcnCodeSlice slice(code.data(), code.data() + code.size(), bool(info.read_fetch_shader));
         GcnDecodeContext decoder;
+        bool returned{};
 
         // Decode and save instructions
         while (!slice.atEnd()) {
             const auto sub_inst = decoder.decodeInstruction(slice);
             if (sub_inst.opcode == Opcode::S_SETPC_B64) {
+                if (native_fetch && sub_inst.src[0].code != inst.dst[0].code) {
+                    throw std::runtime_error("Native fetch shader has an unmatched return");
+                }
                 // Assume we're swapping back to the main shader.
+                returned = true;
                 break;
             }
+            if (native_fetch &&
+                (sub_inst.opcode == Opcode::S_SWAPPC_B64 ||
+                 sub_inst.opcode == Opcode::S_GETPC_B64 ||
+                 (sub_inst.category == InstCategory::FlowControl &&
+                  sub_inst.opcode != Opcode::S_WAITCNT && sub_inst.opcode != Opcode::S_BARRIER &&
+                  sub_inst.opcode != Opcode::S_NOP))) {
+                throw std::runtime_error("Native fetch shader requires control-flow lowering");
+            }
             TranslateInstruction(sub_inst);
+        }
+        if (native_fetch && !returned) {
+            throw std::runtime_error("Native fetch shader ended without returning");
         }
         return;
     }
@@ -1185,8 +1228,8 @@ void Translator::EmitFetch(const GcnInst& inst) {
         }
         const auto filename = fmt::format("vs_{:#018x}.fetch.bin", info.pgm_hash);
         const auto file = IOFile{dump_dir / filename, FileAccessMode::Create};
-        const auto* code = GetFetchShaderCode(info, code_sgpr_base);
-        file.WriteRaw<u8>(code, fetch_data.size);
+        const auto code = GetFetchShaderCode(info, code_sgpr_base);
+        file.WriteRaw<u8>(code.data(), fetch_data.size);
     }
 
     for (u32 semantic = 0; semantic < fetch_data.attributes.size(); ++semantic) {
@@ -1199,9 +1242,31 @@ void Translator::EmitFetch(const GcnInst& inst) {
         const auto values =
             ir.CompositeConstruct(ir.GetAttribute(attr, 0), ir.GetAttribute(attr, 1),
                                   ir.GetAttribute(attr, 2), ir.GetAttribute(attr, 3));
-        const auto converted =
+        auto converted =
             IR::ApplyReadNumberConversionVec4(ir, values, buffer.GetNumberConversion());
-        const auto swizzled = ApplySwizzle(ir, converted, buffer.DstSelect());
+        if (profile.needs_vertex_fetch_lowering) {
+            for (u32 i = AmdGpu::NumComponents(buffer.GetDataFmt()); i < 4; ++i) {
+                converted = ir.CompositeInsert(converted, ir.Imm32(0.f), i);
+            }
+        }
+        auto swizzle = buffer.DstSelect();
+        if (profile.needs_vertex_fetch_lowering && attrib.data_format) {
+            swizzle = AmdGpu::RemapSwizzle(static_cast<AmdGpu::DataFormat>(attrib.data_format),
+                                           AmdGpu::IdentityMapping);
+            for (u32 i = AmdGpu::NumComponents(buffer.GetDataFmt()); i < swizzle.array.size();
+                 ++i) {
+                swizzle.array[i] = AmdGpu::CompSwizzle::Zero;
+            }
+        }
+        auto swizzled = ApplySwizzle(ir, converted, swizzle);
+        if (profile.needs_vertex_fetch_lowering &&
+            AmdGpu::IsInteger(static_cast<AmdGpu::NumberFormat>(buffer.num_format))) {
+            for (u32 i = 0; i < swizzle.array.size(); ++i) {
+                if (swizzle.array[i] == AmdGpu::CompSwizzle::One) {
+                    swizzled = ir.CompositeInsert(swizzled, ir.BitCast<IR::F32>(ir.Imm32(1u)), i);
+                }
+            }
+        }
         for (u32 i = 0; i < attrib.num_elements; i++) {
             ir.SetVectorReg(dst_reg++, IR::F32{ir.CompositeExtract(swizzled, i)});
         }
@@ -1241,6 +1306,18 @@ void Translator::Translate(IR::Block* block, u32 start_pc, IR::Condition cond,
 }
 
 void Translator::TranslateInstruction(const GcnInst& inst) {
+    const bool predicate_memory =
+        profile.needs_memory_predication &&
+        (inst.category == InstCategory::VectorMemory || inst.category == InstCategory::DataShare);
+    if (predicate_memory) {
+        ir.BeginMemoryAccess(ir.GetExec());
+    }
+    if (profile.needs_vector_register_predication && inst.opcode != Opcode::V_WRITELANE_B32 &&
+        (inst.category == InstCategory::VectorALU || inst.category == InstCategory::VectorMemory ||
+         inst.category == InstCategory::DataShare ||
+         inst.category == InstCategory::VectorInterpolation)) {
+        ir.SetVectorPredicate(ir.GetExec());
+    }
     // Emit instructions for each category.
     switch (inst.category) {
     case InstCategory::DataShare:
@@ -1271,6 +1348,10 @@ void Translator::TranslateInstruction(const GcnInst& inst) {
         break;
     default:
         UNREACHABLE();
+    }
+    ir.SetVectorPredicate({});
+    if (predicate_memory) {
+        ir.EndMemoryAccess();
     }
 }
 

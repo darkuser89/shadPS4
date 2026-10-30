@@ -143,10 +143,12 @@ public:
 
     // SOPP
     void S_BARRIER();
+    void S_WAITCNT(const GcnInst& inst);
     void S_SENDMSG(const GcnInst& inst);
 
     // Scalar Memory
     // SMRD
+    IR::U32 ScalarMemoryDwordOffset(const GcnInst& inst, IR::ScalarReg sbase);
     void S_LOAD_DWORD(int num_dwords, const GcnInst& inst);
     void S_BUFFER_LOAD_DWORD(int num_dwords, const GcnInst& inst);
     void S_MEMTIME(const GcnInst& inst);
@@ -336,7 +338,12 @@ public:
     void DS_SWIZZLE_B32(const GcnInst& inst);
     void DS_APPEND(const GcnInst& inst);
     void DS_CONSUME(const GcnInst& inst);
-    void DS_CMPST(int bit_size, bool rtn, const GcnInst& inst);
+    void DS_CMPST(int bit_size, bool rtn, const GcnInst& inst, bool is_float = false);
+    void DS_RMW32(const GcnInst& inst, bool rtn);
+    void DS_RMW64(const GcnInst& inst, bool rtn);
+    void DS_SRC2(const GcnInst& inst, u32 bit_size, IR::SharedMemoryOperation operation);
+    void DS_WRXCHG32(const GcnInst& inst, bool pair, bool stride64);
+    void DS_WRXCHG64(const GcnInst& inst, bool pair, bool stride64);
 
     // Buffer Memory
     // MUBUF / MTBUF

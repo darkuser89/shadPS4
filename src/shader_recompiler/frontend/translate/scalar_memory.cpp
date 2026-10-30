@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "shader_recompiler/frontend/translate/translate.h"
+#include "shader_recompiler/profile.h"
 
 namespace Shader::Gcn {
 
@@ -39,18 +40,27 @@ void Translator::EmitScalarMemory(const GcnInst& inst) {
 
 // SMRD
 
-void Translator::S_LOAD_DWORD(int num_dwords, const GcnInst& inst) {
+IR::U32 Translator::ScalarMemoryDwordOffset(const GcnInst& inst, IR::ScalarReg sbase) {
     const auto& smrd = inst.control.smrd;
+    if (smrd.imm) {
+        return ir.Imm32(smrd.offset);
+    }
+    if (smrd.offset == SQ_SRC_LITERAL) {
+        return ir.Imm32(inst.src[1].code);
+    }
+    const auto byte_offset = ir.GetScalarReg(IR::ScalarReg(smrd.offset));
+    const IR::U32 dword_offset = ir.ShiftRightLogical(byte_offset, ir.Imm32(2));
+    if (!profile.needs_wide_buffer_byte_offsets) {
+        return dword_offset;
+    }
+    const auto low_bits = ir.IAdd(ir.BitwiseAnd(ir.GetScalarReg(sbase), ir.Imm32(3)),
+                                  ir.BitwiseAnd(byte_offset, ir.Imm32(3)));
+    return ir.IAdd(dword_offset, ir.ShiftRightLogical(low_bits, ir.Imm32(2)));
+}
+
+void Translator::S_LOAD_DWORD(int num_dwords, const GcnInst& inst) {
     const IR::ScalarReg sbase{inst.src[0].code * 2};
-    const IR::U32 dword_offset = [&] -> IR::U32 {
-        if (smrd.imm) {
-            return ir.Imm32(smrd.offset);
-        }
-        if (smrd.offset == SQ_SRC_LITERAL) {
-            return ir.Imm32(inst.src[1].code);
-        }
-        return ir.ShiftRightLogical(ir.GetScalarReg(IR::ScalarReg(smrd.offset)), ir.Imm32(2));
-    }();
+    const IR::U32 dword_offset = ScalarMemoryDwordOffset(inst, sbase);
     const IR::Value base =
         ir.CompositeConstruct(ir.GetScalarReg(sbase), ir.GetScalarReg(sbase + 1));
     IR::ScalarReg dst_reg{inst.dst[0].code};
@@ -61,17 +71,8 @@ void Translator::S_LOAD_DWORD(int num_dwords, const GcnInst& inst) {
 }
 
 void Translator::S_BUFFER_LOAD_DWORD(int num_dwords, const GcnInst& inst) {
-    const auto& smrd = inst.control.smrd;
     const IR::ScalarReg sbase{inst.src[0].code * 2};
-    const IR::U32 dword_offset = [&] -> IR::U32 {
-        if (smrd.imm) {
-            return ir.Imm32(smrd.offset);
-        }
-        if (smrd.offset == SQ_SRC_LITERAL) {
-            return ir.Imm32(inst.src[1].code);
-        }
-        return ir.ShiftRightLogical(ir.GetScalarReg(IR::ScalarReg(smrd.offset)), ir.Imm32(2));
-    }();
+    const IR::U32 dword_offset = ScalarMemoryDwordOffset(inst, sbase);
 
     IR::BufferInstInfo buffer_info{};
     buffer_info.pc.Assign(pc);

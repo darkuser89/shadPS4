@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <charconv>
 #include <codecvt>
 #include <fstream>
+#include <limits>
+#include <span>
 #include <sstream>
 #include <string>
 #include <nlohmann/json.hpp>
@@ -11,8 +14,10 @@
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
+#include "core/emulator_settings.h"
 #include "core/emulator_state.h"
 #include "core/file_format/psf.h"
+#include "core/memory.h"
 #include "memory_patcher.h"
 
 namespace MemoryPatcher {
@@ -297,168 +302,243 @@ void ApplyPendingPatches() {
     pending_patches.clear();
 }
 
-void PatchMemory(const patchInfo& patch) {
-    // Send a request to modify the process memory.
-    void* cheatAddress = nullptr;
+static bool UsesNativeMemory() {
+#ifdef __APPLE__
+    return EmulatorSettings.GetRenderer() == "Metal4";
+#else
+    return false;
+#endif
+}
 
-    if (patch.patchMask == PatchMask::None) {
-        if (patch.isOffset) {
-            cheatAddress =
-                reinterpret_cast<void*>(g_eboot_address + std::stoi(patch.offsetStr, 0, 16));
-        } else {
-            cheatAddress = reinterpret_cast<void*>(g_eboot_address +
-                                                   (std::stoi(patch.offsetStr, 0, 16) - 0x400000));
-        }
+static void WritePatchMemory(uintptr_t address, std::span<const u8> bytes) {
+    if (UsesNativeMemory()) {
+        Core::Memory::Instance()->WriteModuleMemory(address, bytes);
+    } else {
+        std::memcpy(reinterpret_cast<void*>(address), bytes.data(), bytes.size());
     }
+}
 
-    if (patch.patchMask == PatchMask::Mask) {
-        cheatAddress = reinterpret_cast<void*>(PatternScan(patch.offsetStr) + patch.maskOffset);
+static int HexDigit(char value) {
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    return -1;
+}
+
+static bool ParsePatchBytes(const std::string& value, std::vector<u8>& bytes) {
+    if (value.empty() || value.size() % 2 != 0) {
+        return false;
+    }
+    bytes.reserve(value.size() / 2);
+    for (size_t i = 0; i < value.size(); i += 2) {
+        const int high = HexDigit(value[i]);
+        const int low = HexDigit(value[i + 1]);
+        if (high < 0 || low < 0) {
+            return false;
+        }
+        bytes.push_back((high << 4) | low);
+    }
+    return true;
+}
+
+static bool IsPatchRange(uintptr_t address, u64 size) {
+    return g_eboot_address != 0 &&
+           g_eboot_image_size <= std::numeric_limits<uintptr_t>::max() - g_eboot_address &&
+           address >= g_eboot_address && address - g_eboot_address <= g_eboot_image_size &&
+           size <= g_eboot_image_size - (address - g_eboot_address);
+}
+
+static uintptr_t OffsetPattern(uintptr_t address, int offset) {
+    if (!address) {
+        return 0;
+    }
+    if (offset < 0) {
+        const u64 magnitude = -static_cast<s64>(offset);
+        return magnitude <= address ? address - magnitude : 0;
+    }
+    return static_cast<u64>(offset) <= std::numeric_limits<uintptr_t>::max() - address
+               ? address + offset
+               : 0;
+}
+
+static bool SetRelativeJump(std::span<u8> bytes, uintptr_t next, uintptr_t target) {
+    const bool forward = target >= next;
+    const u64 distance = forward ? target - next : next - target;
+    if (distance > (forward ? u64{0x7fffffff} : u64{0x80000000})) {
+        return false;
+    }
+    const s32 offset =
+        static_cast<s32>(forward ? static_cast<s64>(distance) : -static_cast<s64>(distance));
+    bytes[0] = 0xE9;
+    std::memcpy(bytes.data() + 1, &offset, sizeof(offset));
+    return true;
+}
+
+void PatchMemory(const patchInfo& patch) {
+    std::vector<u8> payload;
+    if (!ParsePatchBytes(patch.valueStr, payload)) {
+        LOG_ERROR(Loader, "Invalid patch bytes for {}: {}", patch.modNameStr, patch.valueStr);
+        return;
+    }
+    uintptr_t address = 0;
+    if (patch.patchMask == PatchMask::None) {
+        u64 offset = 0;
+        std::string_view value = patch.offsetStr;
+        if (value.starts_with("0x") || value.starts_with("0X")) {
+            value.remove_prefix(2);
+        }
+        const auto [end, error] =
+            std::from_chars(value.data(), value.data() + value.size(), offset, 16);
+        if (error != std::errc{} || end != value.data() + value.size() ||
+            (!patch.isOffset && offset < 0x400000)) {
+            LOG_ERROR(Loader, "Invalid patch address: {}", patch.offsetStr);
+            return;
+        }
+        if (!patch.isOffset) {
+            offset -= 0x400000;
+        }
+        if (offset <= std::numeric_limits<uintptr_t>::max() - g_eboot_address) {
+            address = g_eboot_address + offset;
+        }
+    } else if (patch.patchMask == PatchMask::Mask || patch.patchMask == PatchMask::Mask_Jump32) {
+        address = OffsetPattern(PatternScan(patch.offsetStr), patch.maskOffset);
     }
 
     if (patch.patchMask == PatchMask::Mask_Jump32) {
-        int jumpSize = std::stoi(patch.sizeStr);
-
-        constexpr int MAX_PATTERN_LENGTH = 256;
-        if (jumpSize < 5) {
-            LOG_ERROR(Loader, "Jump size must be at least 5 bytes");
+        u32 jump_size = 0;
+        const auto [end, error] = std::from_chars(
+            patch.sizeStr.data(), patch.sizeStr.data() + patch.sizeStr.size(), jump_size);
+        if (error != std::errc{} || end != patch.sizeStr.data() + patch.sizeStr.size() ||
+            jump_size < 5 || jump_size > 256) {
+            LOG_ERROR(Loader, "Jump size must be between 5 and 256 bytes");
             return;
         }
-        if (jumpSize > MAX_PATTERN_LENGTH) {
-            LOG_ERROR(Loader, "Jump size must be no more than {} bytes.", MAX_PATTERN_LENGTH);
+        const uintptr_t target = PatternScan(patch.targetStr);
+        const u64 cave_size = payload.size() + 5;
+        if (!IsPatchRange(address, jump_size) || !IsPatchRange(target, cave_size) ||
+            (address < target + cave_size && target < address + jump_size)) {
+            LOG_ERROR(Loader, "Invalid or overlapping jump patch ranges for {}", patch.modNameStr);
             return;
         }
-
-        // Find the base address using "Address"
-        uintptr_t baseAddress = PatternScan(patch.offsetStr);
-        if (baseAddress == 0) {
-            LOG_ERROR(Loader, "PatternScan failed for mask_jump32 with pattern: {}",
-                      patch.offsetStr);
+        const uintptr_t cave_end = target + payload.size();
+        payload.resize(cave_size);
+        std::vector<u8> entry(jump_size, 0x90);
+        if (!SetRelativeJump(entry, address + 5, target) ||
+            !SetRelativeJump(std::span{payload}.last(5), cave_end + 5, address + jump_size)) {
+            LOG_ERROR(Loader, "Jump patch is outside the relative jump range for {}",
+                      patch.modNameStr);
             return;
         }
-        uintptr_t patchAddress = baseAddress + patch.maskOffset;
-
-        // Fills the original region (jumpSize bytes) with NOPs
-        std::vector<u8> nopBytes(jumpSize, 0x90);
-        std::memcpy(reinterpret_cast<void*>(patchAddress), nopBytes.data(), nopBytes.size());
-
-        // Use "Target" to locate the start of the code cave
-        uintptr_t jump_target = PatternScan(patch.targetStr);
-        if (jump_target == 0) {
-            LOG_ERROR(Loader, "PatternScan failed to Target with pattern: {}", patch.targetStr);
-            return;
-        }
-
-        // Converts the Value attribute to a byte array (payload)
-        std::vector<u8> payload;
-        for (size_t i = 0; i < patch.valueStr.length(); i += 2) {
-            std::string tempStr = patch.valueStr.substr(i, 2);
-            const char* byteStr = tempStr.c_str();
-            char* endPtr;
-            unsigned int byteVal = std::strtoul(byteStr, &endPtr, 16);
-
-            if (endPtr != byteStr + 2) {
-                LOG_ERROR(Loader, "Invalid byte in Value: {}", patch.valueStr.substr(i, 2));
+        if (UsesNativeMemory()) {
+            std::vector<u8> original(std::max<u64>(entry.size(), payload.size()));
+            auto* memory = Core::Memory::Instance();
+            if (!memory->ReadModuleMemory(address, std::span{original}.first(entry.size())) ||
+                !memory->ReadModuleMemory(target, std::span{original}.first(payload.size()))) {
+                LOG_ERROR(Loader, "Jump patch contains unmapped memory for {}", patch.modNameStr);
                 return;
             }
-            payload.push_back(static_cast<u8>(byteVal));
         }
-
-        // Calculates the end of the code cave (where the return jump will be inserted)
-        uintptr_t code_cave_end = jump_target + payload.size();
-
-        // Write the payload to the code cave, from jump_target
-        std::memcpy(reinterpret_cast<void*>(jump_target), payload.data(), payload.size());
-
-        // Inserts the initial jump in the original region to divert to the code cave
-        u8 jumpInstruction[5];
-        jumpInstruction[0] = 0xE9;
-        s32 relJump = static_cast<s32>(jump_target - patchAddress - 5);
-        std::memcpy(&jumpInstruction[1], &relJump, sizeof(relJump));
-        std::memcpy(reinterpret_cast<void*>(patchAddress), jumpInstruction,
-                    sizeof(jumpInstruction));
-
-        // Inserts jump back at the end of the code cave to resume execution after patching
-        u8 jumpBack[5];
-        jumpBack[0] = 0xE9;
-        // Calculates the relative offset to return to the instruction immediately following the
-        // overwritten region
-        s32 target_return = static_cast<s32>((patchAddress + jumpSize) - (code_cave_end + 5));
-        std::memcpy(&jumpBack[1], &target_return, sizeof(target_return));
-        std::memcpy(reinterpret_cast<void*>(code_cave_end), jumpBack, sizeof(jumpBack));
-
+        WritePatchMemory(target, payload);
+        WritePatchMemory(address, entry);
         LOG_INFO(Loader,
                  "Applied Patch mask_jump32: {}, PatchAddress: {:#x}, JumpTarget: {:#x}, "
                  "CodeCaveEnd: {:#x}, JumpSize: {}",
-                 patch.modNameStr, patchAddress, jump_target, code_cave_end, jumpSize);
+                 patch.modNameStr, address, target, cave_end, jump_size);
         return;
     }
 
-    if (cheatAddress == nullptr) {
-        LOG_ERROR(Loader, "Failed to get address for patch {}", patch.modNameStr);
+    if (!IsPatchRange(address, payload.size())) {
+        LOG_ERROR(Loader, "Invalid address for patch {}", patch.modNameStr);
         return;
     }
-
-    std::vector<unsigned char> bytePatch;
-
-    for (size_t i = 0; i < patch.valueStr.length(); i += 2) {
-        unsigned char byte = static_cast<unsigned char>(
-            std::strtol(patch.valueStr.substr(i, 2).c_str(), nullptr, 16));
-
-        bytePatch.push_back(byte);
-    }
-
     if (patch.littleEndian) {
-        std::reverse(bytePatch.begin(), bytePatch.end());
+        std::reverse(payload.begin(), payload.end());
     }
-
-    std::memcpy(cheatAddress, bytePatch.data(), bytePatch.size());
-
-    LOG_INFO(Loader, "Applied patch: {}, Offset: {:#x}, Value: {}", patch.modNameStr,
-             (uintptr_t)cheatAddress, patch.valueStr);
+    WritePatchMemory(address, payload);
+    LOG_INFO(Loader, "Applied patch: {}, Offset: {:#x}, Value: {}", patch.modNameStr, address,
+             patch.valueStr);
 }
 
 static std::vector<int32_t> PatternToByte(const std::string& pattern) {
     std::vector<int32_t> bytes;
-    const char* start = pattern.data();
-    const char* end = start + pattern.size();
-
-    for (const char* current = start; current < end; ++current) {
-        if (*current == '?') {
-            ++current;
-            if (*current == '?')
-                ++current;
+    for (size_t i = 0; i < pattern.size();) {
+        if (pattern[i] == ' ' || pattern[i] == '\t' || pattern[i] == '\r' || pattern[i] == '\n') {
+            ++i;
+        } else if (pattern[i] == '?') {
+            ++i;
+            if (i < pattern.size() && pattern[i] == '?') {
+                ++i;
+            }
             bytes.push_back(-1);
         } else {
-            bytes.push_back(strtoul(current, const_cast<char**>(&current), 16));
+            if (i + 1 >= pattern.size()) {
+                return {};
+            }
+            const int high = HexDigit(pattern[i]);
+            const int low = HexDigit(pattern[i + 1]);
+            if (high < 0 || low < 0) {
+                return {};
+            }
+            bytes.push_back((high << 4) | low);
+            i += 2;
         }
     }
-
     return bytes;
 }
 
 uintptr_t PatternScan(const std::string& signature) {
-    std::vector<int32_t> patternBytes = PatternToByte(signature);
-    const auto scanBytes = static_cast<uint8_t*>((void*)g_eboot_address);
-
-    const int32_t* sigPtr = patternBytes.data();
-    const size_t sigSize = patternBytes.size();
-
-    uint32_t foundResults = 0;
-    for (uint32_t i = 0; i < g_eboot_image_size - sigSize; ++i) {
-        bool found = true;
-        for (uint32_t j = 0; j < sigSize; ++j) {
-            if (scanBytes[i + j] != sigPtr[j] && sigPtr[j] != -1) {
-                found = false;
-                break;
+    const auto pattern = PatternToByte(signature);
+    if (pattern.empty() || pattern.size() > g_eboot_image_size ||
+        !IsPatchRange(g_eboot_address, g_eboot_image_size)) {
+        return 0;
+    }
+    const auto matches = [&](std::span<const u8> bytes) -> size_t {
+        for (size_t i = 0; i + pattern.size() <= bytes.size(); ++i) {
+            bool found = true;
+            for (size_t j = 0; j < pattern.size(); ++j) {
+                if (pattern[j] != -1 && bytes[i + j] != pattern[j]) {
+                    found = false;
+                    break;
+                }
+            }
+            if (found) {
+                return i;
             }
         }
-
-        if (found) {
-            foundResults++;
-            return reinterpret_cast<uintptr_t>(&scanBytes[i]);
-        }
+        return bytes.size();
+    };
+    if (!UsesNativeMemory()) {
+        const std::span bytes{reinterpret_cast<const u8*>(g_eboot_address), g_eboot_image_size};
+        const size_t offset = matches(bytes);
+        return offset < bytes.size() ? g_eboot_address + offset : 0;
     }
 
+    std::vector<u8> bytes;
+    uintptr_t address = g_eboot_address;
+    const uintptr_t end = address + g_eboot_image_size;
+    while (address < end) {
+        constexpr u64 PageSize = 16_KB;
+        const u64 length = std::min<u64>(PageSize - address % PageSize, end - address);
+        const size_t tail = bytes.size();
+        bytes.resize(tail + length);
+        if (!Core::Memory::Instance()->ReadModuleMemory(address, std::span{bytes}.subspan(tail))) {
+            bytes.clear();
+        } else {
+            const size_t offset = matches(bytes);
+            if (offset < bytes.size()) {
+                return address - tail + offset;
+            }
+            const size_t retain = std::min(bytes.size(), pattern.size() - 1);
+            bytes.erase(bytes.begin(), bytes.end() - retain);
+        }
+        address += length;
+    }
     return 0;
 }
 

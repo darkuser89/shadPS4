@@ -39,6 +39,11 @@ namespace DebugStateType {
 
 extern bool showing_debug_menu_bar;
 
+struct Resolution {
+    u32 width;
+    u32 height;
+};
+
 enum class QueueType {
     dcb = 0,
     ccb = 1,
@@ -166,9 +171,9 @@ public:
     float Framerate = 1.0f / 60.0f;
     float FrameDeltaTime;
 
-    std::pair<u32, u32> game_resolution{};
-    std::pair<u32, u32> output_resolution{};
-    bool is_using_fsr{};
+    std::atomic<Resolution> game_resolution{};
+    std::atomic<Resolution> output_resolution{};
+    std::atomic_bool is_using_fsr{};
 
     void ShowDebugMessage(std::string message) {
         if (message.empty()) {

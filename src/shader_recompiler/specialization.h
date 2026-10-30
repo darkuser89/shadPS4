@@ -46,6 +46,7 @@ struct BufferSpecialization {
 struct ImageSpecialization {
     AmdGpu::ImageType type = AmdGpu::ImageType::Color2D;
     bool is_integer = false;
+    bool is_signed = false;
     bool is_storage = false;
     bool is_srgb = false;
     AmdGpu::CompMapping dst_select{};
@@ -93,6 +94,26 @@ struct StageSpecialization {
     StageSpecialization() = default;
     StageSpecialization(const Info& info_, RuntimeInfo runtime_info_, const Profile& profile_,
                         Backend::Bindings start_)
+        : StageSpecialization{info_, runtime_info_, profile_, start_,
+                              [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
+                                  spec.stride = sharp.GetStride();
+                                  spec.is_formatted = desc.is_formatted;
+                                  spec.swizzle_enable = sharp.swizzle_enable;
+                                  if (spec.is_formatted) {
+                                      spec.data_format = static_cast<u32>(sharp.GetDataFmt());
+                                      spec.num_format = static_cast<u32>(sharp.GetNumberFmt());
+                                      spec.dst_select = sharp.DstSelect();
+                                      spec.num_conversion = sharp.GetNumberConversion();
+                                  }
+                                  if (spec.swizzle_enable) {
+                                      spec.index_stride = sharp.index_stride;
+                                      spec.element_size = sharp.element_size;
+                                  }
+                              }} {}
+
+    template <typename BufferSpecializer>
+    StageSpecialization(const Info& info_, RuntimeInfo runtime_info_, const Profile& profile_,
+                        Backend::Bindings start_, BufferSpecializer&& specialize_buffer)
         : info{&info_}, runtime_info{runtime_info_}, start{start_} {
         if (info_.sw_stage == SwStage::Vertex && Gcn::ParseFetchShader(info_, fetch_shader_data)) {
             // Specialize shader on VS input number types to follow spec.
@@ -112,22 +133,7 @@ struct StageSpecialization {
                          });
         }
         u32 binding{};
-        ForEachSharp(binding, buffers, info->buffers,
-                     [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
-                         spec.stride = sharp.GetStride();
-                         spec.is_formatted = desc.is_formatted;
-                         spec.swizzle_enable = sharp.swizzle_enable;
-                         if (spec.is_formatted) {
-                             spec.data_format = static_cast<u32>(sharp.GetDataFmt());
-                             spec.num_format = static_cast<u32>(sharp.GetNumberFmt());
-                             spec.dst_select = sharp.DstSelect();
-                             spec.num_conversion = sharp.GetNumberConversion();
-                         }
-                         if (spec.swizzle_enable) {
-                             spec.index_stride = sharp.index_stride;
-                             spec.element_size = sharp.element_size;
-                         }
-                     });
+        ForEachSharp(binding, buffers, info->buffers, specialize_buffer);
         ForEachSharp(binding, images, info->images,
                      [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
                          spec.type = sharp.GetViewType(desc.is_array);

@@ -32,7 +32,8 @@ IR::BlockList GenerateBlocks(const IR::AbstractSyntaxList& syntax_list) {
 }
 
 void EmitControlFlowGraph(IR::Program& program, Pools& pools, Gcn::CFG& cfg,
-                          RuntimeInfo& runtime_info, const Profile& profile) {
+                          RuntimeInfo& runtime_info, const Profile& profile,
+                          const TranslationHooks* hooks) {
     Gcn::Translator translator{program.info, runtime_info, profile};
     for (auto& block : cfg) {
         const u32 start = block.begin_index;
@@ -44,7 +45,13 @@ void EmitControlFlowGraph(IR::Program& program, Pools& pools, Gcn::CFG& cfg,
                              std::span{program.ins_list}.subspan(start, size));
         program.blocks.push_back(ir_block);
     }
-    translator.EmitPrologue(program.blocks.front());
+    auto* entry = program.blocks.front();
+    const auto body = entry->begin();
+    translator.EmitPrologue(entry);
+    if (hooks && hooks->prologue) {
+        IR::IREmitter ir{*entry, body};
+        hooks->prologue(program, ir);
+    }
     ASSERT_MSG(!program.info.translation_failed, "Shader translation has failed");
     for (auto& block : cfg) {
         auto* ir_block = block.ir_block;
@@ -61,7 +68,12 @@ void EmitControlFlowGraph(IR::Program& program, Pools& pools, Gcn::CFG& cfg,
 }
 
 IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Info& info,
-                             RuntimeInfo& runtime_info, const Profile& profile) {
+                             RuntimeInfo& runtime_info, const Profile& profile,
+                             void (*lower_resources)(IR::Program&),
+                             bool (*patch_buffer)(IR::Inst&, Info&),
+                             ImageReadConverter convert_image_read,
+                             ImageSampleConverter convert_image_sample,
+                             const TranslationHooks* hooks) {
     // Ensure first instruction is expected.
     constexpr u32 token_mov_vcchi = 0xBEEB03FF;
     if (code[0] != token_mov_vcchi) {
@@ -84,7 +96,7 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     // Create control flow graph
     Common::ObjectPool<Gcn::Block> gcn_block_pool{64};
     Gcn::CFG cfg{gcn_block_pool, program.ins_list};
-    EmitControlFlowGraph(program, pools, cfg, runtime_info, profile);
+    EmitControlFlowGraph(program, pools, cfg, runtime_info, profile, hooks);
 
     // On NVIDIA GPUs HW interpolation of clip distance values seems broken, and we need to emulate
     // it with expensive discard in PS.
@@ -104,15 +116,26 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
         Shader::Optimization::TessellationPreprocess(program, runtime_info);
         Shader::Optimization::DomainShaderTransform(program, runtime_info);
     }
-    Shader::Optimization::RingAccessElimination(program, runtime_info);
+    if (!hooks || !hooks->lower_rings || !hooks->lower_rings(program, runtime_info)) {
+        Shader::Optimization::RingAccessElimination(program, runtime_info);
+    }
     Shader::IR::DumpProgram(program, info, "pre-res-discover.");
     auto resources = Shader::Optimization::ResourceDiscoverPass(program, profile);
-    Shader::Optimization::FlattenExtendedUserdataPass(program);
+    Shader::Optimization::FlattenExtendedUserdataPass(program, resources);
     Shader::IR::DumpProgram(program, info, "pre-res-patch.");
-    Shader::Optimization::ResourcePatchingPass(program.info, resources, profile);
+    Shader::Optimization::ResourcePatchingPass(program.info, resources, profile, patch_buffer,
+                                               convert_image_read, convert_image_sample);
+    if (lower_resources) {
+        lower_resources(program);
+    }
+    if (hooks && hooks->lower_resources) {
+        hooks->lower_resources(program);
+    }
     Shader::Optimization::LowerBufferFormatToRaw(program);
     Shader::Optimization::SharedMemorySimplifyPass(program, profile);
-    Shader::Optimization::SharedMemoryToStoragePass(program, runtime_info, profile);
+    if (!profile.lower_shared_memory_after_wave64) {
+        Shader::Optimization::SharedMemoryToStoragePass(program, runtime_info, profile);
+    }
     Shader::Optimization::LowerUserClipPlanes(program, runtime_info);
     Shader::Optimization::PhiSimplificationPass(program);
     Shader::Optimization::InverseBallotEliminationPass(program);
@@ -130,6 +153,9 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     program.syntax_list = Shader::Gcn::BuildASL(pools, cfg, info);
     program.blocks = GenerateBlocks(program.syntax_list);
     program.post_order_blocks = Shader::IR::PostOrder(program.syntax_list.front().data.block);
+    if (hooks && hooks->structured) {
+        hooks->structured(program);
+    }
 
     // Run optimization passes on structured graph
     Shader::Optimization::SsaRepairPass(program);
@@ -137,6 +163,9 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::SharedMemoryBarrierPass(program, runtime_info, profile);
     Shader::Optimization::DeadCodeEliminationPass(program);
     Shader::Optimization::LowerWave64BallotPass(program, runtime_info, profile);
+    if (profile.lower_shared_memory_after_wave64) {
+        Shader::Optimization::SharedMemoryToStoragePass(program, runtime_info, profile);
+    }
     Shader::Optimization::LowerHardwareIntrinsics(program);
     Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
     Shader::Optimization::DeadCodeEliminationPass(program);

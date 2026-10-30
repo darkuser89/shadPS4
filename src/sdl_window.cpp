@@ -32,6 +32,7 @@
 
 #ifdef __APPLE__
 #include <SDL3/SDL_metal.h>
+#include "video_core/renderer_metal/metal_platform.h"
 #endif
 #include <core/emulator_settings.h>
 #include "core/libraries/keyboard/keyboard.h"
@@ -98,6 +99,19 @@ static Uint32 SDLCALL PollControllerLightColour(void* userdata, SDL_TimerID time
 WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controllers_,
                      std::string_view window_title)
     : width{width_}, height{height_}, controllers{*controllers_} {
+    const auto renderer = EmulatorSettings.GetRenderer();
+    if (renderer != "Metal4" && renderer != "Vulkan") {
+        UNREACHABLE_MSG("Unknown GPU renderer: {}", renderer);
+    }
+#ifdef __APPLE__
+    if (renderer == "Metal4") {
+        Metal::RequireAppleSilicon();
+    }
+#else
+    if (renderer == "Metal4") {
+        UNREACHABLE_MSG("Metal 4 requires Apple Silicon and macOS 26 or later");
+    }
+#endif
     if (!SDL_SetHint(SDL_HINT_APP_NAME, "shadPS4")) {
         UNREACHABLE_MSG("Failed to set SDL window hint: {}", SDL_GetError());
     }
@@ -120,7 +134,8 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height);
-    SDL_SetNumberProperty(props, "flags", SDL_WINDOW_VULKAN);
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_METAL_BOOLEAN, renderer == "Metal4");
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, renderer == "Vulkan");
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
     // Creating the window directly in fullscreen avoids a visible windowed -> fullscreen
     // transition on startup. SDL sizes the window to the display and keeps the requested
